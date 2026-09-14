@@ -68,6 +68,7 @@ docs/SPEC.md         # the build plan (milestones)
 docs/KICKOFF.md      # how to drive the build
 .claude/             # permissions + slash commands
 docker/              # agent-server.Dockerfile (docker execution image)
+skills/              # shared skill catalog, loaded into every agent (see MANUAL.md)
 src/harness/         # the harness package, incl. server.py (server mode)
 tests/               # mirrors src/harness/
 projects/            # generated software, one subfolder per --project (git-ignored)

@@ -110,6 +110,34 @@ def test_local_execution_runs_task_and_prints_final_message(monkeypatch, capsys)
     assert "all done" in capsys.readouterr().out
 
 
+def test_agents_md_without_project_is_rejected(monkeypatch, capsys):
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("run_task should not be called")
+
+    monkeypatch.setattr(cli, "load_config", lambda: _cfg())
+    monkeypatch.setattr(cli, "run_task", _fail_if_called)
+
+    exit_code = cli.main(["do something", "--agents-md", "some content"])
+
+    assert exit_code == 1
+    assert "--agents-md requires --project" in capsys.readouterr().err
+
+
+def test_agents_md_with_project_writes_file(monkeypatch, tmp_path):
+    def _fake_run_task(task, cfg=None):
+        return []
+
+    monkeypatch.setattr(cli, "load_config", lambda: _cfg(projects_dir=str(tmp_path)))
+    monkeypatch.setattr(cli, "run_task", _fake_run_task)
+
+    exit_code = cli.main(
+        ["do something", "--project", "myapp", "--agents-md", "This project uses FastAPI."]
+    )
+
+    assert exit_code == 0
+    assert (tmp_path / "myapp" / "AGENTS.md").read_text() == "This project uses FastAPI."
+
+
 def test_execution_flag_overrides_configured_docker_default(monkeypatch):
     calls = {}
 

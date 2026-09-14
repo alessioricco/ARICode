@@ -26,6 +26,7 @@ DEFAULT_MAX_ITERATIONS = 50
 DEFAULT_CONFIRM_MODE = "never"
 DEFAULT_EXECUTION = "local"
 DEFAULT_PROJECTS_DIR = "./projects"
+DEFAULT_SKILLS_DIR = "./skills"
 DEFAULT_DOCKER_IMAGE = "coding-agent-harness/agent-server:local"
 DEFAULT_DOCKER_PLATFORM = (
     "linux/arm64" if _platform.machine().lower() in ("arm64", "aarch64") else "linux/amd64"
@@ -55,6 +56,10 @@ class Config:
     # but `--project NAME` (cli.py) overrides it to `projects_dir/NAME`, created if
     # missing, so each project's generated software lands in its own subfolder.
     projects_dir: str = DEFAULT_PROJECTS_DIR
+
+    # Shared skill catalog loaded into every agent's AgentContext (see skills.py).
+    # Trigger-based (keyword/task/path), not project-specific — see MANUAL.md.
+    skills_dir: str = DEFAULT_SKILLS_DIR
 
     # Only consulted when execution == "docker" (see workspace.py).
     docker_image: str = DEFAULT_DOCKER_IMAGE
@@ -146,6 +151,7 @@ def load_config(env: Mapping[str, str] | None = None, *, dotenv_path: str = ".en
         name="HARNESS_EXECUTION",
     )
     projects_dir = _clean(env.get("HARNESS_PROJECTS_DIR")) or DEFAULT_PROJECTS_DIR
+    skills_dir = _clean(env.get("HARNESS_SKILLS_DIR")) or DEFAULT_SKILLS_DIR
     docker_image = _clean(env.get("HARNESS_DOCKER_IMAGE")) or DEFAULT_DOCKER_IMAGE
     docker_platform = _parse_choice(
         env.get("HARNESS_DOCKER_PLATFORM"),
@@ -163,6 +169,7 @@ def load_config(env: Mapping[str, str] | None = None, *, dotenv_path: str = ".en
         confirm_mode=confirm_mode,
         execution=execution,
         projects_dir=projects_dir,
+        skills_dir=skills_dir,
         docker_image=docker_image,
         docker_platform=docker_platform,
     )

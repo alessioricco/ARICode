@@ -110,6 +110,33 @@ def test_create_task_with_project_creates_subfolder(monkeypatch, tmp_path):
     assert (tmp_path / "myapp").is_dir()
 
 
+def test_create_task_agents_md_without_project_returns_400(monkeypatch):
+    monkeypatch.setattr(server, "load_config", lambda: _cfg())
+
+    client = TestClient(server.create_app())
+    response = client.post("/tasks", json={"task": "do something", "agents_md": "content"})
+
+    assert response.status_code == 400
+    assert "agents_md requires project" in response.json()["detail"]
+
+
+def test_create_task_agents_md_with_project_writes_file(monkeypatch, tmp_path):
+    def _fake_stream_task(task, cfg=None, on_message=None):
+        return None
+
+    monkeypatch.setattr(server, "load_config", lambda: _cfg(projects_dir=str(tmp_path)))
+    monkeypatch.setattr(server, "stream_task", _fake_stream_task)
+
+    client = TestClient(server.create_app())
+    response = client.post(
+        "/tasks",
+        json={"task": "do something", "project": "myapp", "agents_md": "This project uses FastAPI."},
+    )
+    _wait_for_status(client, response.json()["task_id"])
+
+    assert (tmp_path / "myapp" / "AGENTS.md").read_text() == "This project uses FastAPI."
+
+
 def test_create_task_config_error_returns_400_immediately(monkeypatch):
     def _raise() -> Config:
         raise ConfigError("LLM_MODEL is required")

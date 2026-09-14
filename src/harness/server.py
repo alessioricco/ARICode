@@ -18,11 +18,15 @@ from typing import Any
 
 from .config import Config, ConfigError, load_config
 from .runner import stream_task
+from .skills import write_project_context
 
 _SENTINEL = object()
 
 
-def _resolve_cfg(*, execution: str | None, project: str | None) -> Config:
+def _resolve_cfg(*, execution: str | None, project: str | None, agents_md: str | None) -> Config:
+    if agents_md is not None and project is None:
+        raise ValueError("agents_md requires project")
+
     cfg = load_config()
     if execution is not None:
         cfg = replace(cfg, execution=execution)
@@ -30,6 +34,8 @@ def _resolve_cfg(*, execution: str | None, project: str | None) -> Config:
         project_dir = os.path.abspath(os.path.join(cfg.projects_dir, project))
         os.makedirs(project_dir, exist_ok=True)
         cfg = replace(cfg, workspace=project_dir)
+    if agents_md is not None:
+        write_project_context(cfg.workspace, agents_md)
     return cfg
 
 
@@ -73,6 +79,7 @@ def create_app():
         task: str
         project: str | None = None
         execution: str | None = None
+        agents_md: str | None = None
 
     app = FastAPI(title="Coding-Agent Harness")
     tasks: dict[str, _TaskRecord] = {}
@@ -110,8 +117,10 @@ def create_app():
         # only a run-time error (once the agent is actually working) becomes an
         # async "failed" status instead of an HTTP error.
         try:
-            cfg = _resolve_cfg(execution=request.execution, project=request.project)
-        except ConfigError as exc:
+            cfg = _resolve_cfg(
+                execution=request.execution, project=request.project, agents_md=request.agents_md
+            )
+        except (ConfigError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         record = _TaskRecord(id=str(uuid.uuid4()), task=request.task)
@@ -143,7 +152,9 @@ def create_app():
         try:
             payload = await websocket.receive_json()
             request = TaskRequest(**payload)
-            cfg = _resolve_cfg(execution=request.execution, project=request.project)
+            cfg = _resolve_cfg(
+                execution=request.execution, project=request.project, agents_md=request.agents_md
+            )
         except (ConfigError, ValueError) as exc:
             await websocket.send_json({"type": "error", "detail": str(exc)})
             await websocket.close()

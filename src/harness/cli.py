@@ -10,6 +10,7 @@ from dataclasses import replace
 
 from .config import ConfigError, load_config
 from .runner import run_task
+from .skills import write_project_context
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -37,6 +38,17 @@ def _build_parser() -> argparse.ArgumentParser:
             "Defaults to HARNESS_WORKSPACE when omitted."
         ),
     )
+    parser.add_argument(
+        "--agents-md",
+        default=None,
+        help=(
+            "Content to write as this project's AGENTS.md before running the "
+            "task — persistent, project-specific facts/conventions the agent "
+            "picks up on this and every future task against the same "
+            "project. Requires --project (there's no project directory to "
+            "write into otherwise)."
+        ),
+    )
     return parser
 
 
@@ -52,11 +64,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.execution is not None:
         cfg = replace(cfg, execution=args.execution)
 
+    if args.agents_md is not None and args.project is None:
+        print("Error: --agents-md requires --project", file=sys.stderr)
+        return 1
+
     if args.project is not None:
         project_dir = os.path.abspath(os.path.join(cfg.projects_dir, args.project))
         os.makedirs(project_dir, exist_ok=True)
         cfg = replace(cfg, workspace=project_dir)
         print(f"Project workspace: {cfg.workspace}")
+
+    if args.agents_md is not None:
+        write_project_context(cfg.workspace, args.agents_md)
 
     try:
         messages = run_task(args.task, cfg=cfg)

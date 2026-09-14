@@ -20,6 +20,7 @@ reference — how to actually run and configure the thing.
 - [CLI reference](#cli-reference)
 - [Server mode (HTTP/WebSocket)](#server-mode-httpwebsocket)
 - [Projects: one subfolder per generated project](#projects-one-subfolder-per-generated-project)
+- [Skills](#skills)
 - [Execution modes](#execution-modes)
 - [Switching LLM provider / model](#switching-llm-provider--model)
 - [Custom tools](#custom-tools)
@@ -72,13 +73,14 @@ template with every variable documented inline.
 | `HARNESS_CONFIRM_MODE` | `never` | `never` \| `always` (pause before each tool call — policy not yet wired to an actual confirmation gate; see `agent.py`). |
 | `HARNESS_EXECUTION` | `local` | `local` \| `docker` — see [Execution modes](#execution-modes). |
 | `HARNESS_PROJECTS_DIR` | `./projects` | Root folder for generated projects; `--project NAME` resolves to `HARNESS_PROJECTS_DIR/NAME`. |
+| `HARNESS_SKILLS_DIR` | `./skills` | Shared skill catalog loaded into every agent's `AgentContext` — see [Skills](#skills). |
 | `HARNESS_DOCKER_IMAGE` | `coding-agent-harness/agent-server:local` | Image used for `HARNESS_EXECUTION=docker`. Built automatically on first use. |
 | `HARNESS_DOCKER_PLATFORM` | auto-detected from host arch | `linux/amd64` \| `linux/arm64`. Leave blank to auto-detect (arm64 on Apple Silicon, amd64 otherwise). |
 
 ## CLI reference
 
 ```bash
-uv run python -m harness "<task>" [--execution {local,docker}] [--project NAME]
+uv run python -m harness "<task>" [--execution {local,docker}] [--project NAME] [--agents-md TEXT]
 ```
 
 (Also installed as a console script: `harness "<task>" ...`, once the package
@@ -88,6 +90,8 @@ is installed via `uv pip install -e .`.)
 - `--execution {local,docker}` — overrides `HARNESS_EXECUTION` for this run only.
 - `--project NAME` — overrides the workspace to `HARNESS_PROJECTS_DIR/NAME`
   (created if missing). See [Projects](#projects-one-subfolder-per-generated-project).
+- `--agents-md TEXT` — writes `TEXT` as this project's `AGENTS.md`. Requires
+  `--project`. See [Skills](#skills).
 
 Exit code is `0` on success, `1` on a configuration error or a run-time error
 (printed to stderr as `Configuration error: ...` / `Error: ...` — not a raw
@@ -147,11 +151,13 @@ curl -X POST http://127.0.0.1:8000/tasks \
 ```
 
 Request body: `task` (required), `project` (optional, same meaning as CLI
-`--project`), `execution` (optional, same meaning as CLI `--execution`).
-Response (`202 Accepted`): `{"task_id": "...", "status": "..."}`. Config
-errors are validated synchronously before a task is even created, so those
-still come back as `400` immediately — only a run-time failure (once the
-agent is actually working) shows up later as an async `"failed"` status via
+`--project`), `execution` (optional, same meaning as CLI `--execution`),
+`agents_md` (optional, same meaning as CLI `--agents-md` — requires `project`
+in the same request). Response (`202 Accepted`): `{"task_id": "...", "status":
+"..."}`. Config errors — including `agents_md` without `project` — are
+validated synchronously before a task is even created, so those still come
+back as `400` immediately — only a run-time failure (once the agent is
+actually working) shows up later as an async `"failed"` status via
 `GET /tasks/{task_id}`, not as an HTTP error on this call.
 
 ### `GET /tasks/{task_id}` — poll status/result
@@ -233,6 +239,97 @@ The resolved workspace is always made absolute before being handed to the
 agent (`os.path.abspath` in `cli.py`) — this matters because the agent's
 `file_editor` tool requires absolute paths and does not resolve relative ones
 against the workspace itself (see [Known limitations](#known-limitations)).
+
+## Skills
+
+Two distinct mechanisms — don't conflate them. "Microagents" in spec section
+9's wording is the old OpenHands term for what the SDK now calls **Skills**
+(unified with the cross-platform [agentskills.io](https://agentskills.io/specification)
+spec — the same shape of idea as the Claude Code skills used to build this
+project, by design). See `src/harness/skills.py` for the implementation and
+`ROADMAP.md`'s decisions log for why this shape was chosen over the
+alternatives that were considered.
+
+### Shared skill catalog (`skills/`)
+
+`HARNESS_SKILLS_DIR` (default `./skills`) is a library of **reusable**
+knowledge — conventions worth writing once and applying to *any* project
+where they're relevant, not facts about one specific project. Every skill is
+loaded into every agent's `AgentContext` (`build_agent()` in `agent.py`); the
+SDK matches each skill's own trigger against the task/conversation
+automatically — there's no custom "which skill applies" logic in this
+codebase, and no extra LLM call to decide relevance.
+
+**File format** — a markdown file with YAML frontmatter (the "legacy
+OpenHands" format; AgentSkills-standard `SKILL.md` directories also work, but
+only one level deep — see the caveat below):
+
+```markdown
+---
+name: pytest-conventions          # optional; derived from the file path if absent
+triggers:
+  - pytest
+  - test
+description: Conventions for writing pytest-based tests.
+---
+
+Markdown content here — this is what gets injected when the skill fires.
+```
+
+**Trigger types**, set via frontmatter, not code:
+
+| Frontmatter | Trigger | Fires when |
+|---|---|---|
+| `triggers: [...]` | `KeywordTrigger` | one of the listed keywords appears in the task/conversation (whole-token, case-insensitive) |
+| `paths: [...]` | `PathTrigger` | the agent touches a file matching one of the globs — a "rule", not model-invocable |
+| *(neither)* | none (`repo` skill) | always active, injected unconditionally |
+
+**Subfolders are purely organizational** — `skills/testing/`, `skills/web/`,
+etc. exist for human classification only. `load_skill_catalog()` doesn't walk
+directories itself; the SDK's `load_skills_from_dir()` finds `.md` files
+recursively (`rglob("*.md")`) under the hood, so nesting costs nothing extra.
+The one caveat: `SKILL.md`-format AgentSkills directories are only detected
+one level deep (an SDK constraint) — use the flat `.md`-with-frontmatter
+format for anything inside a category subfolder.
+
+This repo ships four example skills to prove the wiring and as a starting
+point: `skills/testing/pytest-conventions.md`, `skills/git/commit-conventions.md`
+(both `KeywordTrigger`), `skills/python-web/fastapi-conventions.md`
+(`KeywordTrigger`), and `skills/python-web/pin-dependencies.md` (`PathTrigger`
+— fires on `pyproject.toml`/`requirements*.txt`, not on task text). Add more
+the same way; no registration step beyond dropping the file in `skills/`.
+
+### Per-project context (`--agents-md` / `agents_md`)
+
+The other mechanism: **persistent, project-specific facts** ("this project
+uses FastAPI + Poetry"), not reusable expertise. Since this harness is driven
+by a task, not a human editing files in a project's subfolder between runs,
+the caller supplies this content as a parameter and the harness writes it:
+
+```bash
+uv run python -m harness "..." --project my-api --agents-md "This project uses FastAPI + Poetry."
+```
+
+```bash
+curl -X POST http://127.0.0.1:8000/tasks -H "Content-Type: application/json" \
+  -d '{"task": "...", "project": "my-api", "agents_md": "This project uses FastAPI + Poetry."}'
+```
+
+This writes (overwrites) `<project_dir>/AGENTS.md` — a filename the SDK's
+`load_project_skills()` already recognizes as a "third-party" instruction
+file with no frontmatter required, so it applies to this task and every
+future task against the same project directory, with zero extra wiring.
+`--agents-md`/`agents_md` **requires** `--project`/`project` — supplying it
+without a named project is rejected (`400` / CLI exit 1) rather than silently
+writing into whatever `HARNESS_WORKSPACE` happens to be, which could be this
+repo's own working directory.
+
+**Status:** both mechanisms verified live — a task containing "pytest"
+correctly triggered `pytest-conventions` (confirmed via the SDK's own log
+line, `Skill 'pytest-conventions' triggered by keyword 'pytest'`, and the
+model's response followed the injected conventions); a real `--agents-md`
+call wrote `AGENTS.md` to the project folder and a subsequent task's
+`<REPO_CONTEXT>` block contained it verbatim, reflected in the model's answer.
 
 ## Execution modes
 
@@ -354,6 +451,8 @@ uv run pytest -q
 ```
 
 - `tests/test_config.py` — env parsing, no SDK, no network.
+- `tests/test_skills.py` — `load_skill_catalog()` (against a temp directory
+  with nested subfolders) and `write_project_context()`, no LLM.
 - `tests/custom_tools/test_*.py` — tool executors called directly, no LLM.
 - `tests/test_workspace.py` — `build_workspace()` dispatch; the Docker branch
   monkeypatches `subprocess` and `DockerWorkspace`, so this suite never

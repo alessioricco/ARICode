@@ -18,7 +18,7 @@ build plan. This file is the living, evolving companion to that static plan.
 | 3 | Provider-swap live proof | **Blocked** — needs a 2nd provider key or a local model endpoint; user chose to skip rather than provide one |
 | 4 | Custom tool + test | Done — `run_tests_tool` |
 | 5 | CLI + README + execution-mode flag | Done, verified live |
-| 6 | Optional (section 9) | Docker execution: done. Server mode: done (REST async submit+poll, WS streaming). Microagents/skills: not started. OpenAI-compatible endpoint: not started. |
+| 6 | Optional (section 9) | Docker execution: done. Server mode: done (REST async submit+poll, WS streaming). Skills (formerly "microagents"): done — shared catalog + per-project AGENTS.md. OpenAI-compatible endpoint: not started. |
 
 ## What's implemented
 
@@ -39,12 +39,16 @@ build plan. This file is the living, evolving companion to that static plan.
   `GET /tasks/{id}` (poll status/partial progress/result), `WS /tasks/stream`
   (live streaming). All three task-facing endpoints share one background
   thread + callback pattern.
+- `skills.py` — two mechanisms, don't conflate them: `load_skill_catalog()`
+  loads the shared, reusable, trigger-based catalog (`skills/`, arbitrary
+  subfolders for classification) into every agent's `AgentContext`
+  (`agent.py`); `write_project_context()` writes a caller-supplied,
+  project-specific `AGENTS.md` (CLI `--agents-md`, REST `agents_md`, both
+  requiring `--project`/`project`). See MANUAL.md "Skills" for the full
+  writeup and CLAUDE.md-linked rationale.
 
 ## Backlog — optional / not yet built
 
-- **Microagents/skills (`AgentContext`)** — repo-specific context the agent
-  loads automatically instead of a bloated task prompt (spec section 9).
-  Not scoped in detail yet.
 - **OpenAI-compatible endpoint** — a `/v1/chat/completions`-shaped adapter for
   tools that only know how to talk to "OpenAI," distinct from the REST/WS
   server. Would need a translation layer mapping chat-completions
@@ -115,3 +119,27 @@ build plan. This file is the living, evolving companion to that static plan.
   large doc) avoids a casual user wading through backlog/decision-log content
   to find "how do I run this," and avoids re-deriving project history from
   conversation scrollback in future sessions.
+- **Skills: two separate mechanisms, not one "smart" one.** Considered (a) the
+  caller passing an AGENTS.md-equivalent with every task, (b) an LLM call to
+  pick the "best" skill for a task, (c) a shared skill repository (git or
+  local). Rejected (b): the SDK's own `KeywordTrigger`/`TaskTrigger`/
+  `PathTrigger` matching (confirmed live — see `agent_context.py`'s
+  `get_user_message_suffix`, which runs automatically on every user message)
+  already decides relevance deterministically, for free, with no extra LLM
+  call or custom classifier. Kept (a) and (c) as genuinely different, both
+  needed: (c) is reusable expertise (this repo's `skills/` — local-dir-backed
+  today via `load_skills_from_dir`, but `MarketplaceRegistration`/
+  `load_public_skills` already exist in the SDK for a git-repo-backed catalog
+  if that's ever wanted); (a) is a persistent fact about *one* project
+  (`--agents-md`/`agents_md`, written by the harness into the project's
+  `AGENTS.md` — never by a human, since no human touches a `--project`
+  subfolder between task invocations in this harness's actual usage model).
+- **`AgentContext.load_project_skills=True` is required, and non-obviously
+  so.** `AgentContext`'s own `_load_auto_skills` validator explicitly does
+  *not* handle `load_project_skills` (it hardcodes `include_project=False`) —
+  that flag is instead consumed later, lazily, by `LocalConversation` once
+  the real workspace path is known (`conv_state.workspace.working_dir`).
+  Confirmed by reading `local_conversation.py` directly rather than assuming
+  from the field's docstring. Without setting this flag explicitly on the
+  `AgentContext` we build, `write_project_context()`'s `AGENTS.md` would be
+  written but silently never loaded.
