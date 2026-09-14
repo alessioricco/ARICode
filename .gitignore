@@ -216,3 +216,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# harness
+private/
+
+# Secrets
+.env
+.env.local
+secrets/
+
+# Claude Code personal overrides
+.claude/settings.local.json
