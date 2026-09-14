@@ -14,8 +14,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.6"]
-# Uncomment when enabling sandboxed/remote execution (HARNESS_EXECUTION=docker):
-# sandbox = ["openhands-workspace", "openhands-agent-server"]
+# Sandboxed/remote execution (HARNESS_EXECUTION=docker) — spike, not yet wired
+# into src/. See docs/SPEC.md section 9.
+sandbox = ["openhands-workspace", "openhands-agent-server"]
 
 [project.scripts]
 harness = "harness.cli:main"
