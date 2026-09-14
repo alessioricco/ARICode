@@ -29,7 +29,10 @@ build plan. This file is the living, evolving companion to that static plan.
 - `custom_tools/run_tests_tool.py` — runs pytest, structured results; registers
   at import time (not just on demand) so both `local` execution and the
   Docker image's `--import-modules` mechanism pick it up.
-- `cli.py` — `python -m harness "<task>" [--execution] [--project]`.
+- `cli.py` — `python -m harness "<task>" [--execution] [--project] [--agents-md]`.
+  `task` is resolved via `resolve_task_source()`: http(s) URL (fetched) or an
+  existing local file (read) take precedence over literal text. CLI-only —
+  server mode's `task` field does not do this resolution.
 - `workspace.py` — single dispatch point for execution backends
   (`build_workspace(cfg)`); `local` returns a plain path, `docker` returns a
   `DockerWorkspace`, both as context managers so cleanup is automatic.
@@ -143,3 +146,13 @@ build plan. This file is the living, evolving companion to that static plan.
   from the field's docstring. Without setting this flag explicitly on the
   `AgentContext` we build, `write_project_context()`'s `AGENTS.md` would be
   written but silently never loaded.
+- **CLI `task` argument stays a single positional, with content-sniffing —
+  not separate `--task-file`/`--task-url` flags, and not scoped to the
+  server too.** A URL (http/https only) or an existing local file wins over
+  literal text; no override flag to force literal interpretation, since a
+  task description colliding with a real, existing filename is an unlikely
+  edge case not worth a second flag for. Deliberately CLI-only: a human
+  typing a command line benefits from not needing `--task-file`/`$(cat ...)`
+  shell tricks; a REST/WS API caller is already writing code and can
+  read/fetch content itself before the request — adding the same resolution
+  server-side would just be a second, redundant place doing the same thing.

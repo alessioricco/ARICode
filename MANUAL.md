@@ -86,7 +86,13 @@ uv run python -m harness "<task>" [--execution {local,docker}] [--project NAME] 
 (Also installed as a console script: `harness "<task>" ...`, once the package
 is installed via `uv pip install -e .`.)
 
-- `task` (positional, required) — the instruction given to the agent.
+- `task` (positional, required) — the instruction given to the agent, **or a
+  reference to it**: an http(s) URL (fetched) or a path to an existing local
+  file (read), checked in that order before falling back to literal text.
+  See `resolve_task_source()` in `cli.py`. Server mode's `task` field (REST/
+  WS) does **not** do this resolution — it's CLI-only; API callers already
+  have the content in hand or can fetch/read it themselves before the
+  request.
 - `--execution {local,docker}` — overrides `HARNESS_EXECUTION` for this run only.
 - `--project NAME` — overrides the workspace to `HARNESS_PROJECTS_DIR/NAME`
   (created if missing). See [Projects](#projects-one-subfolder-per-generated-project).
@@ -108,7 +114,31 @@ uv run python -m harness "Scaffold a FastAPI service with a /health endpoint." -
 
 # Same project, containerized
 uv run python -m harness "Add a /version endpoint." --project my-api --execution docker
+
+# Task text from a local file
+uv run python -m harness ./tasks/build-the-thing.md --project my-api
+
+# Task text fetched from a URL
+uv run python -m harness https://example.com/tasks/build-the-thing.md --project my-api
 ```
+
+### Task source resolution
+
+`resolve_task_source()` checks, in order: is it an http(s) URL (fetched with
+a 15s timeout)? Is it an existing local file (read as UTF-8)? If neither,
+the value is used exactly as given, as literal task text. Only `http`/`https`
+schemes are ever fetched — this is also what keeps a `file://...` value from
+ever reaching `urlopen` (it just falls through to the literal-text case,
+since it won't match an existing path either). Whitespace-only content from
+a file or URL is rejected as a clear error rather than silently running an
+empty task; a fetch/read failure is reported the same way (`Error: ...`,
+exit 1), not a raw traceback.
+
+**Known edge case:** a literal task description that happens to exactly
+match an existing filename in the current directory will be read as that
+file's content instead of used literally — there's no override flag to force
+literal interpretation. Unlikely in practice (task descriptions are rarely
+also valid, existing filenames), but worth knowing.
 
 ## Server mode (HTTP/WebSocket)
 
@@ -460,7 +490,9 @@ uv run pytest -q
   (`pytest.importorskip("openhands.workspace")`) when the `sandbox` extra
   isn't installed.
 - `tests/test_cli.py` — argument parsing and control flow; `load_config`/
-  `run_task` are monkeypatched, no LLM, no Docker.
+  `run_task` are monkeypatched, no LLM, no Docker. Includes
+  `resolve_task_source()` (literal/file/URL, with `urlopen` monkeypatched —
+  no real network call).
 - `tests/test_server.py` — REST/WebSocket routes via FastAPI's `TestClient`;
   `load_config`/`run_task`/`stream_task` are monkeypatched, no LLM. Skips
   cleanly (`pytest.importorskip("fastapi")`) when the `server` extra isn't

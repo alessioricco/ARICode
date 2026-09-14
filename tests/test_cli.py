@@ -4,6 +4,10 @@ these exercise only argument parsing and control flow.
 
 from __future__ import annotations
 
+import urllib.error
+
+import pytest
+
 from harness import cli
 from harness.config import Config, ConfigError
 
@@ -30,6 +34,93 @@ class _FakeContent:
 class _FakeMessage:
     def __init__(self, text: str) -> None:
         self.content = [_FakeContent(text)]
+
+
+class _FakeUrlResponse:
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def read(self) -> bytes:
+        return self._body
+
+
+def test_resolve_task_source_returns_literal_text_unchanged():
+    assert cli.resolve_task_source("Refactor utils.py") == "Refactor utils.py"
+
+
+def test_resolve_task_source_reads_existing_file(tmp_path):
+    task_file = tmp_path / "task.md"
+    task_file.write_text("Do the thing described here.\n")
+
+    assert cli.resolve_task_source(str(task_file)) == "Do the thing described here."
+
+
+def test_resolve_task_source_fetches_url(monkeypatch):
+    monkeypatch.setattr(
+        cli.urllib.request,
+        "urlopen",
+        lambda url, timeout: _FakeUrlResponse(b"Task fetched from the web."),
+    )
+
+    assert cli.resolve_task_source("https://example.com/task.md") == "Task fetched from the web."
+
+
+def test_resolve_task_source_url_fetch_error_raises_value_error(monkeypatch):
+    def _raise(url, timeout):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(cli.urllib.request, "urlopen", _raise)
+
+    with pytest.raises(ValueError, match="Failed to fetch task from URL"):
+        cli.resolve_task_source("https://example.com/task.md")
+
+
+def test_resolve_task_source_empty_file_raises_value_error(tmp_path):
+    task_file = tmp_path / "empty.md"
+    task_file.write_text("   \n")
+
+    with pytest.raises(ValueError, match="is empty"):
+        cli.resolve_task_source(str(task_file))
+
+
+def test_main_reads_task_from_file(monkeypatch, tmp_path, capsys):
+    task_file = tmp_path / "task.md"
+    task_file.write_text("Create HELLO.txt with the line: hi.")
+    calls = {}
+
+    def _fake_run_task(task, cfg=None):
+        calls["task"] = task
+        return [_FakeMessage("done")]
+
+    monkeypatch.setattr(cli, "load_config", lambda: _cfg())
+    monkeypatch.setattr(cli, "run_task", _fake_run_task)
+
+    exit_code = cli.main([str(task_file)])
+
+    assert exit_code == 0
+    assert calls["task"] == "Create HELLO.txt with the line: hi."
+
+
+def test_main_reports_task_resolution_error(monkeypatch, capsys):
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("run_task should not be called")
+
+    def _raise(url, timeout):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(cli.urllib.request, "urlopen", _raise)
+    monkeypatch.setattr(cli, "run_task", _fail_if_called)
+
+    exit_code = cli.main(["https://example.com/task.md"])
+
+    assert exit_code == 1
+    assert "Failed to fetch task from URL" in capsys.readouterr().err
 
 
 def test_config_error_is_reported_and_exits_nonzero(monkeypatch, capsys):

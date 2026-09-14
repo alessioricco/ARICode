@@ -6,11 +6,50 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import urllib.error
+import urllib.request
 from dataclasses import replace
+from urllib.parse import urlparse
 
 from .config import ConfigError, load_config
 from .runner import run_task
 from .skills import write_project_context
+
+_URL_FETCH_TIMEOUT_SECONDS = 15
+
+
+def _looks_like_url(value: str) -> bool:
+    parsed = urlparse(value)
+    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+
+
+def resolve_task_source(value: str) -> str:
+    """Resolve the `task` argument to actual task text.
+
+    Checked in order: an http(s) URL is fetched (the scheme check is also
+    what keeps a bare `file://...` value from ever reaching urlopen); else an
+    existing local file is read; else the value is used as literal task
+    text, unchanged.
+    """
+    if _looks_like_url(value):
+        try:
+            with urllib.request.urlopen(value, timeout=_URL_FETCH_TIMEOUT_SECONDS) as resp:
+                content = resp.read().decode("utf-8")
+        except (urllib.error.URLError, UnicodeDecodeError) as exc:
+            raise ValueError(f"Failed to fetch task from URL {value!r}: {exc}") from exc
+    elif os.path.isfile(value):
+        try:
+            with open(value, encoding="utf-8") as f:
+                content = f.read()
+        except OSError as exc:
+            raise ValueError(f"Failed to read task file {value!r}: {exc}") from exc
+    else:
+        return value
+
+    content = content.strip()
+    if not content:
+        raise ValueError(f"Task content from {value!r} is empty")
+    return content
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -18,7 +57,13 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="harness",
         description="Run a coding task through the agent harness.",
     )
-    parser.add_argument("task", help="The task to give the agent.")
+    parser.add_argument(
+        "task",
+        help=(
+            "The task to give the agent — literal text, a path to a local "
+            "file containing it, or an http(s) URL to fetch it from."
+        ),
+    )
     parser.add_argument(
         "--execution",
         choices=("local", "docker"),
@@ -56,6 +101,12 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
 
     try:
+        task = resolve_task_source(args.task)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    try:
         cfg = load_config()
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
@@ -78,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
         write_project_context(cfg.workspace, args.agents_md)
 
     try:
-        messages = run_task(args.task, cfg=cfg)
+        messages = run_task(task, cfg=cfg)
     except Exception as exc:  # noqa: BLE001 - surfaced as a clean CLI error, not a traceback
         print(f"Error: {exc}", file=sys.stderr)
         return 1
