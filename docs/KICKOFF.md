@@ -7,12 +7,15 @@ milestone.
 
 ## First session prompt (paste this)
 
+Milestone 1 (config + tests) is already implemented and passing. Start here:
+
 > Read CLAUDE.md and docs/SPEC.md. Confirm you understand the goal, the golden
-> rules, and the milestone plan, then implement **Milestone 1** only: create
-> `pyproject.toml` (pinning `openhands-sdk` and `openhands-tools` together),
-> confirm `.env.example`, and implement `src/harness/config.py` with
-> `tests/test_config.py`. Run `pytest -q` and report results. Do not start
-> Milestone 2.
+> rules, and the milestone plan. Verify Milestone 1 is green by running
+> `pip install -e ".[dev]"` (or install openhands-sdk + openhands-tools together)
+> and `pytest -q`. Then implement **Milestone 2** only: `llm.py`, `tools.py`,
+> `agent.py`, and `runner.py` using the verified code in spec section 6 and the
+> built-in tools, and get a hello-world task running end to end against one
+> provider. Report results. Do not start Milestone 3.
 
 ## Then, for each subsequent milestone
 

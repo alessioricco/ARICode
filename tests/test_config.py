@@ -1,0 +1,110 @@
+"""Tests for harness.config — pure, no SDK, no network.
+
+Every test passes an explicit `env` dict so the real environment and .env file are
+never touched.
+"""
+
+import pytest
+
+from harness.config import (
+    DEFAULT_CONFIRM_MODE,
+    DEFAULT_EXECUTION,
+    DEFAULT_MAX_ITERATIONS,
+    DEFAULT_WORKSPACE,
+    Config,
+    ConfigError,
+    load_config,
+)
+
+
+def _base_env(**overrides: str) -> dict[str, str]:
+    env = {"LLM_MODEL": "anthropic/claude-sonnet-4-5-20250929", "LLM_API_KEY": "sk-test"}
+    env.update(overrides)
+    return env
+
+
+def test_minimal_valid_env_applies_defaults():
+    cfg = load_config(_base_env())
+    assert isinstance(cfg, Config)
+    assert cfg.model == "anthropic/claude-sonnet-4-5-20250929"
+    assert cfg.api_key == "sk-test"
+    assert cfg.base_url is None
+    assert cfg.workspace == DEFAULT_WORKSPACE
+    assert cfg.max_iterations == DEFAULT_MAX_ITERATIONS
+    assert cfg.confirm_mode == DEFAULT_CONFIRM_MODE
+    assert cfg.execution == DEFAULT_EXECUTION
+
+
+def test_all_values_parsed():
+    cfg = load_config(
+        _base_env(
+            LLM_BASE_URL="http://localhost:11434",
+            HARNESS_WORKSPACE="/tmp/ws",
+            HARNESS_MAX_ITERATIONS="12",
+            HARNESS_CONFIRM_MODE="always",
+            HARNESS_EXECUTION="docker",
+        )
+    )
+    assert cfg.base_url == "http://localhost:11434"
+    assert cfg.workspace == "/tmp/ws"
+    assert cfg.max_iterations == 12
+    assert cfg.confirm_mode == "always"
+    assert cfg.execution == "docker"
+
+
+def test_missing_model_raises():
+    with pytest.raises(ConfigError, match="LLM_MODEL is required"):
+        load_config({"LLM_API_KEY": "sk-test"})
+
+
+def test_missing_key_without_base_url_raises():
+    with pytest.raises(ConfigError, match="LLM_API_KEY is required"):
+        load_config({"LLM_MODEL": "anthropic/claude-sonnet-4-5-20250929"})
+
+
+def test_base_url_allows_missing_key():
+    # Local models can be keyless: base_url present, api_key absent -> OK.
+    cfg = load_config(
+        {"LLM_MODEL": "ollama/llama3", "LLM_BASE_URL": "http://localhost:11434"}
+    )
+    assert cfg.api_key is None
+    assert cfg.base_url == "http://localhost:11434"
+
+
+def test_blank_values_treated_as_absent():
+    cfg = load_config(_base_env(HARNESS_WORKSPACE="   ", HARNESS_CONFIRM_MODE=""))
+    assert cfg.workspace == DEFAULT_WORKSPACE
+    assert cfg.confirm_mode == DEFAULT_CONFIRM_MODE
+
+
+def test_whitespace_is_trimmed():
+    cfg = load_config(_base_env(LLM_MODEL="  openai/gpt-4o  "))
+    assert cfg.model == "openai/gpt-4o"
+
+
+@pytest.mark.parametrize("bad", ["0", "-3", "abc", "3.5"])
+def test_invalid_max_iterations_raises(bad):
+    with pytest.raises(ConfigError, match="HARNESS_MAX_ITERATIONS"):
+        load_config(_base_env(HARNESS_MAX_ITERATIONS=bad))
+
+
+def test_invalid_confirm_mode_raises():
+    with pytest.raises(ConfigError, match="HARNESS_CONFIRM_MODE"):
+        load_config(_base_env(HARNESS_CONFIRM_MODE="sometimes"))
+
+
+def test_invalid_execution_raises():
+    with pytest.raises(ConfigError, match="HARNESS_EXECUTION"):
+        load_config(_base_env(HARNESS_EXECUTION="kubernetes"))
+
+
+def test_choices_are_case_insensitive():
+    cfg = load_config(_base_env(HARNESS_CONFIRM_MODE="ALWAYS", HARNESS_EXECUTION="Docker"))
+    assert cfg.confirm_mode == "always"
+    assert cfg.execution == "docker"
+
+
+def test_config_is_frozen():
+    cfg = load_config(_base_env())
+    with pytest.raises(Exception):
+        cfg.model = "openai/gpt-4o"  # type: ignore[misc]

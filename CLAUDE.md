@@ -12,6 +12,20 @@ so it stays **model-agnostic**.
 The full build plan lives in @docs/SPEC.md. Follow it milestone by milestone
 (section 11 of the spec). The kickoff prompt is in @docs/KICKOFF.md.
 
+**Milestone 1 is already done:** `src/harness/config.py` and
+`tests/test_config.py` are implemented and passing (15 tests). Start at
+Milestone 2.
+
+**These four SDK APIs are already verified** against the live docs — the code in
+spec section 6/7 is correct, use it as written (no need to re-verify these):
+`LLM(usage_id=..., model=..., base_url=..., api_key=SecretStr(...))`;
+`get_default_tools()` from `openhands.tools.preset`; result capture via a
+`Conversation(callbacks=[...])` callback filtering `LLMConvertibleEvent` and
+calling `.to_llm_message()` (there is no `conversation.result`); and the custom
+tool `Action`/`Observation`/`Executor` + `register_tool` + `Tool(name=...)`
+pattern. Still `/verify-sdk` anything NOT in that list (e.g. the confirmation
+policy API, Docker workspace API).
+
 ## The golden rules
 
 1. **Build ON the OpenHands SDK. Do not reinvent it.** The agent loop, tool
@@ -30,28 +44,42 @@ The full build plan lives in @docs/SPEC.md. Follow it milestone by milestone
 
 ## Tech stack
 
-- Python 3.11+
+- Python 3.12+
 - `openhands-sdk` + `openhands-tools` — a **matched set**: always install/upgrade
   both in one command at the same version, or imports break.
 - `python-dotenv` (config), `pytest` (tests), `ruff` (lint/format).
 - Package uses a `src/` layout; code lives in `src/harness/`.
 
+## Environment
+
+This project uses **uv** for the virtual environment and dependencies. Run every
+Python command through `uv run ...`, which uses the project's `.venv`
+automatically — no manual activation needed. Install deps with
+`uv pip install -e ".[dev]"` (resolves everything from `pyproject.toml`). Never
+install into system Python — it's PEP 668 externally-managed and will error. If a
+command seems to hit the wrong interpreter, or an install fails with
+"externally-managed-environment", something bypassed uv: stop and ask me rather
+than reaching for `--break-system-packages` or `sudo`.
+
 ## Commands
 
+`uv run` executes inside the project venv automatically.
+
 ```bash
-# Setup (install sdk + tools together)
-pip install -U openhands-sdk openhands-tools python-dotenv
-pip install -U pytest ruff            # dev
+# Setup — installs the harness + all deps from pyproject.toml:
+# openhands-sdk & openhands-tools (same version), python-dotenv, and dev tools.
+uv pip install -e ".[dev]"
 
 # Run the harness
-python -m harness "your task here"
+uv run python -m harness "your task here"
 
 # Test / lint
-pytest -q
-ruff check . && ruff format .
+uv run pytest -q
+uv run ruff check . && uv run ruff format .
 ```
 
-If you introduce a dependency, add it to `pyproject.toml` and pin it.
+Add new dependencies to `pyproject.toml` (don't `pip install` them ad hoc), and
+keep `openhands-sdk`/`openhands-tools` pinned to the same version.
 
 ## Code conventions
 
@@ -69,7 +97,7 @@ If you introduce a dependency, add it to `pyproject.toml` and pin it.
 - Tool executors are tested directly (no LLM).
 - Any end-to-end test that needs a real API key must **skip cleanly when the key
   is absent**, so CI passes without secrets.
-- Run `pytest -q` after each milestone; do not move on with failing tests.
+- Run `uv run pytest -q` after each milestone; do not move on with failing tests.
 
 ## Working style
 
@@ -83,7 +111,8 @@ If you introduce a dependency, add it to `pyproject.toml` and pin it.
 ## Gotchas
 
 - `openhands-sdk` and `openhands-tools` version mismatch → `ModuleNotFoundError`
-  on `openhands.sdk.*`. Fix by reinstalling both together.
+  on `openhands.sdk.*`. Fix with `uv pip install -e ".[dev]"` (or pin both to the
+  same version in `pyproject.toml`).
 - Model ID strings (e.g. `anthropic/claude-sonnet-4-5-20250929`) change over
   time — verify current IDs against provider + LiteLLM docs, don't assume.
 - Individual built-in tool class names have varied across SDK versions — that's

@@ -2,7 +2,7 @@
 name = "coding-agent-harness"
 version = "0.1.0"
 description = "Model-agnostic coding agent harness built on the OpenHands SDK"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     # openhands-sdk and openhands-tools are a MATCHED SET: keep the two version
     # specifiers identical and upgrade them together, or imports will break.
@@ -30,3 +30,8 @@ packages = ["src/harness"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "--import-mode=importlib"

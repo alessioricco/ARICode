@@ -77,53 +77,80 @@ Tests mirror this under `tests/`.
 
 ## 6. Core wiring
 
+> The code below was verified against the live docs (getting-started + the full
+> custom-tools example) on the date this spec was written. `config.py` +
+> `tests/test_config.py` are already implemented and passing (Milestone 1 done).
+
+`config.py` — **already implemented** (pure env parsing, no SDK). Exposes
+`Config` (frozen dataclass: model, api_key, base_url, workspace, max_iterations,
+confirm_mode, execution), `ConfigError`, and `load_config(env=None)`.
+
 `llm.py`
 ```python
+from pydantic import SecretStr
 from openhands.sdk import LLM
+from .config import Config
 
-def build_llm() -> LLM:
-    # Reads LLM_MODEL / LLM_API_KEY / LLM_BASE_URL from the environment.
-    # Validate LLM_MODEL is set; for non-local providers require a key.
-    return LLM.load_from_env()
+def build_llm(cfg: Config) -> LLM:
+    # Provider is encoded in cfg.model's prefix (LiteLLM convention:
+    # "anthropic/...", "openai/gpt-4o", "gemini/...", "ollama/...").
+    return LLM(
+        usage_id="harness",
+        model=cfg.model,
+        base_url=cfg.base_url,
+        api_key=SecretStr(cfg.api_key) if cfg.api_key else None,
+    )
 ```
 
 `tools.py`
 ```python
 from openhands.tools.preset import get_default_tools
-from .custom_tools.example_tool import build_example_tool
+from .custom_tools.example_tool import register_example_tool
 
 def build_tools() -> list:
-    tools = list(get_default_tools())   # terminal, file editor, task tracker, browser, MCP
-    tools.append(build_example_tool())
+    # get_default_tools() -> terminal, file editor, task tracker, browser, MCP.
+    tools = list(get_default_tools())
+    tools.append(register_example_tool())   # returns Tool(name="ExampleTool")
     return tools
 ```
 
 `agent.py`
 ```python
 from openhands.sdk import Agent
+from .config import Config
 from .llm import build_llm
 from .tools import build_tools
 
-def build_agent() -> Agent:
-    agent = Agent(llm=build_llm(), tools=build_tools())
-    # If HARNESS_CONFIRM_MODE=always, attach a confirmation policy that pauses
-    # before each tool call (verify current policy API).
+def build_agent(cfg: Config) -> Agent:
+    agent = Agent(llm=build_llm(cfg), tools=build_tools())
+    # If cfg.confirm_mode == "always", attach a confirmation policy that pauses
+    # before each tool call (verify the current policy API via /verify-sdk).
     return agent
 ```
 
-`runner.py`
+`runner.py` — result is captured via an event callback (there is **no**
+`conversation.result`):
 ```python
-from openhands.sdk import Conversation
+from openhands.sdk import Conversation, Event, LLMConvertibleEvent
 from .agent import build_agent
 from .config import load_config
 
-def run_task(task: str):
+def run_task(task: str) -> list:
     cfg = load_config()
-    conversation = Conversation(agent=build_agent(), workspace=cfg.workspace)
+    messages: list = []
+
+    def on_event(event: Event) -> None:
+        if isinstance(event, LLMConvertibleEvent):
+            messages.append(event.to_llm_message())
+
+    conversation = Conversation(
+        agent=build_agent(cfg),
+        callbacks=[on_event],
+        workspace=cfg.workspace,
+    )
     conversation.send_message(task)
     conversation.run()
-    # Extract the final result from the conversation object (confirm accessor).
-    return conversation
+    return messages   # last message is the final assistant output
 ```
 
 ## 7. Custom tools (where our value lives)
@@ -131,28 +158,55 @@ def run_task(task: str):
 Follow the SDK's Action / Observation / Executor pattern; mirror
 `examples/01_standalone_sdk/02_custom_tools.py`.
 
-`custom_tools/example_tool.py` (template — replace with a real tool):
+`custom_tools/example_tool.py` (template — verified shape; replace with a real tool):
 ```python
+from collections.abc import Sequence
+
 from pydantic import Field
-from openhands.sdk import Action, Observation
-from openhands.sdk.tool import ToolExecutor, register_tool
-# Confirm exact imports/signatures against 02_custom_tools.py.
+from openhands.sdk import (
+    Action, Observation, TextContent, ImageContent, ToolDefinition,
+)
+from openhands.sdk.tool import Tool, ToolExecutor, register_tool
+
 
 class ExampleAction(Action):
     query: str = Field(description="What to do")
 
+
 class ExampleObservation(Observation):
     result: str = ""
 
-class ExampleExecutor(ToolExecutor):
-    def __call__(self, action: ExampleAction) -> ExampleObservation:
-        return ExampleObservation(result="done")
+    @property
+    def to_llm_content(self) -> Sequence[TextContent | ImageContent]:
+        # How the result is shown to the model.
+        return [TextContent(text=self.result or "No result.")]
 
-def build_example_tool():
-    # Register the definition and return a Tool the Agent accepts, following the
-    # exact register_tool + ToolDefinition wiring from the example.
-    ...
+
+class ExampleExecutor(ToolExecutor[ExampleAction, ExampleObservation]):
+    def __call__(self, action: ExampleAction, conversation=None) -> ExampleObservation:
+        # ... do the work ...
+        return ExampleObservation(result=f"handled: {action.query}")
+
+
+def _make_example_tool(conv_state) -> list[ToolDefinition]:
+    # Factory receives conv_state -> access to conv_state.workspace.working_dir, etc.
+    return [
+        ToolDefinition(
+            name="ExampleTool",
+            description="One-line description the model reads to decide when to use it.",
+            action_type=ExampleAction,
+            observation_type=ExampleObservation,
+            executor=ExampleExecutor(),
+        )
+    ]
+
+
+def register_example_tool() -> Tool:
+    register_tool("ExampleTool", _make_example_tool)
+    return Tool(name="ExampleTool")
 ```
+> Executor logic is unit-tested directly: construct an `ExampleAction`, call the
+> executor, assert on the `ExampleObservation` — no LLM, no network.
 
 Real tools to consider later: a test-runner that parses failures, a codebase
 indexer/searcher, a project-specific linter, a deploy/PR trigger.
@@ -181,8 +235,10 @@ indexer/searcher, a project-specific linter, a deploy/PR trigger.
 
 ## 11. Milestones (build order)
 
-1. Scaffold: `pyproject.toml` (pin sdk + tools together), confirm `.env.example`,
-   implement `config.py` + `test_config.py`.
+1. ~~Scaffold: `pyproject.toml`, `.env.example`, `config.py` + `test_config.py`.~~
+   **DONE** — `config.py` and `tests/test_config.py` are implemented and passing
+   (15 tests). Start at Milestone 2. (`pyproject.toml` still needs its SDK
+   versions pinned once a working release is confirmed — see section 3.)
 2. `llm.py` + `tools.py` + `agent.py` + `runner.py` with built-in tools only;
    get a hello-world task running end to end against one provider.
 3. Prove provider-swap: change only `LLM_MODEL`, re-run against a second provider
