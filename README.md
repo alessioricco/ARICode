@@ -13,11 +13,12 @@ tools, and known limitations/troubleshooting. This README is a quickstart.
 
 Milestones 1, 2, 4, and 5 (see `docs/SPEC.md` section 11) are implemented and
 tested: config, LLM/tools/agent/runner wiring, a custom tool, and the CLI.
-Docker execution (spec section 9, originally optional) is also implemented —
-see below. Milestone 3 (live proof of a provider swap against a second
-provider/local model) is code-ready but not yet run live — it needs a second
-provider's key or a local model endpoint. Built by Claude Code following
-`docs/SPEC.md`, milestone by milestone; see `docs/KICKOFF.md` to start.
+Docker execution and an HTTP/WebSocket server mode (spec section 9,
+originally optional) are also implemented — see `MANUAL.md`. Milestone 3
+(live proof of a provider swap against a second provider/local model) is
+code-ready but not yet run live — it needs a second provider's key or a local
+model endpoint. Built by Claude Code following `docs/SPEC.md`, milestone by
+milestone; see `docs/KICKOFF.md` to start.
 
 ## Setup
 
@@ -66,7 +67,7 @@ docs/SPEC.md         # the build plan (milestones)
 docs/KICKOFF.md      # how to drive the build
 .claude/             # permissions + slash commands
 docker/              # agent-server.Dockerfile (docker execution image)
-src/harness/         # the harness package (built by Claude Code)
+src/harness/         # the harness package, incl. server.py (server mode)
 tests/               # mirrors src/harness/
 projects/            # generated software, one subfolder per --project (git-ignored)
 ```

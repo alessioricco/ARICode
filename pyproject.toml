@@ -14,12 +14,14 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.6"]
-# Sandboxed/remote execution (HARNESS_EXECUTION=docker) — spike, not yet wired
-# into src/. See docs/SPEC.md section 9.
+# Sandboxed/remote execution (HARNESS_EXECUTION=docker). See docs/SPEC.md section 9.
 sandbox = ["openhands-workspace", "openhands-agent-server"]
+# HTTP/WebSocket server mode (harness-server). See docs/SPEC.md section 9.
+server = ["fastapi>=0.110", "uvicorn[standard]>=0.30", "httpx>=0.27"]
 
 [project.scripts]
 harness = "harness.cli:main"
+harness-server = "harness.server:main"
 
 [build-system]
 requires = ["hatchling"]

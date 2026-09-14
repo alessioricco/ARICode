@@ -6,8 +6,12 @@ from __future__ import annotations
 
 import subprocess
 
+import pytest
+
 from harness import workspace as workspace_mod
 from harness.config import Config
+
+pytest.importorskip("openhands.workspace")
 
 
 def _cfg(**overrides) -> Config:

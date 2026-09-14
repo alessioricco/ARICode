@@ -18,6 +18,7 @@ reference — how to actually run and configure the thing.
 - [Setup](#setup)
 - [Configuration reference](#configuration-reference)
 - [CLI reference](#cli-reference)
+- [Server mode (HTTP/WebSocket)](#server-mode-httpwebsocket)
 - [Projects: one subfolder per generated project](#projects-one-subfolder-per-generated-project)
 - [Execution modes](#execution-modes)
 - [Switching LLM provider / model](#switching-llm-provider--model)
@@ -44,6 +45,12 @@ Only needed for `HARNESS_EXECUTION=docker`:
 
 ```bash
 uv pip install -e ".[sandbox]"    # adds openhands-workspace, openhands-agent-server
+```
+
+Only needed for [server mode](#server-mode-httpwebsocket):
+
+```bash
+uv pip install -e ".[server]"     # adds fastapi, uvicorn, httpx
 ```
 
 `openhands-sdk` and `openhands-tools` are a matched set — always
@@ -98,6 +105,72 @@ uv run python -m harness "Scaffold a FastAPI service with a /health endpoint." -
 # Same project, containerized
 uv run python -m harness "Add a /version endpoint." --project my-api --execution docker
 ```
+
+## Server mode (HTTP/WebSocket)
+
+`src/harness/server.py` exposes the same `run_task`/`stream_task` machinery
+the CLI uses as an HTTP/WebSocket API, so an IDE plugin, dashboard, or script
+can drive the harness over the network instead of shelling out to the CLI.
+It's a thin interface on top of the existing agent loop — not a second
+implementation of it (same golden rule as `cli.py`: config, custom tools, an
+interface, and policy are ours; the SDK owns the loop).
+
+Requires the `server` extra (`uv pip install -e ".[server]"`); importing
+`harness.server` without it raises a clear `RuntimeError` rather than an
+import failure.
+
+```bash
+uv run harness-server --host 127.0.0.1 --port 8000
+# or: uv run python -m harness.server --port 8000
+```
+
+### `GET /health`
+
+Returns `{"status": "ok"}`.
+
+### `POST /tasks`
+
+Runs a task synchronously (blocks until the agent finishes) and returns the
+full result:
+
+```bash
+curl -X POST http://127.0.0.1:8000/tasks \
+  -H "Content-Type: application/json" \
+  -d '{"task": "Create HELLO.txt with the line: hi.", "project": "my-api", "execution": "docker"}'
+```
+
+Request body: `task` (required), `project` (optional, same meaning as CLI
+`--project`), `execution` (optional, same meaning as CLI `--execution`).
+Response: `{"final_message": "...", "messages": [...]}` — `messages` is every
+captured `Message`, full-fidelity (`model_dump(mode="json")`), not just text.
+`400` on a config error, `500` on a run-time error — both with a `detail`
+string, no raw traceback leaked to the client.
+
+### `WS /tasks/stream`
+
+Same inputs, sent as the first WebSocket message, but streams each message
+as the agent produces it instead of blocking for the whole run:
+
+```python
+import json
+from websockets.sync.client import connect
+
+with connect("ws://127.0.0.1:8000/tasks/stream") as ws:
+    ws.send(json.dumps({"task": "...", "project": "my-api"}))
+    while True:
+        print(json.loads(ws.recv()))   # raises ConnectionClosedOK when the run finishes
+```
+
+Each frame is `{"type": "message", ...Message.model_dump()}` or
+`{"type": "error", "detail": "..."}`; the server closes the socket once the
+run finishes (normal close, code 1000) or after sending an error. The blocking
+`conversation.run()` call runs in a background thread per connection, bridged
+to the async WebSocket loop via a queue — this is why `server.py` needs
+`threading`/`queue`, not just `asyncio`.
+
+**Status:** verified live — real REST call created a file via the live LLM
+and returned the full message history; real WebSocket connection streamed
+all 8 messages of a multi-step task live, then closed cleanly.
 
 ## Projects: one subfolder per generated project
 
@@ -240,9 +313,15 @@ uv run pytest -q
 - `tests/custom_tools/test_*.py` — tool executors called directly, no LLM.
 - `tests/test_workspace.py` — `build_workspace()` dispatch; the Docker branch
   monkeypatches `subprocess` and `DockerWorkspace`, so this suite never
-  touches a real Docker daemon.
+  touches a real Docker daemon. Skips cleanly
+  (`pytest.importorskip("openhands.workspace")`) when the `sandbox` extra
+  isn't installed.
 - `tests/test_cli.py` — argument parsing and control flow; `load_config`/
   `run_task` are monkeypatched, no LLM, no Docker.
+- `tests/test_server.py` — REST/WebSocket routes via FastAPI's `TestClient`;
+  `load_config`/`run_task`/`stream_task` are monkeypatched, no LLM. Skips
+  cleanly (`pytest.importorskip("fastapi")`) when the `server` extra isn't
+  installed.
 - `tests/test_runner.py` — real end-to-end smoke test. **Skips cleanly** when
   `LLM_MODEL`/`LLM_API_KEY` aren't configured; when they are, it makes one
   real, cheap LLM call and asserts a file was actually created. This means a
