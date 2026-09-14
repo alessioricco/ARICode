@@ -219,6 +219,7 @@ __marimo__/
 
 # harness
 private/
+/projects/
 
 # Secrets
 .env

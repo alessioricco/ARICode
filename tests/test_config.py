@@ -8,8 +8,11 @@ import pytest
 
 from harness.config import (
     DEFAULT_CONFIRM_MODE,
+    DEFAULT_DOCKER_IMAGE,
+    DEFAULT_DOCKER_PLATFORM,
     DEFAULT_EXECUTION,
     DEFAULT_MAX_ITERATIONS,
+    DEFAULT_PROJECTS_DIR,
     DEFAULT_WORKSPACE,
     Config,
     ConfigError,
@@ -33,6 +36,9 @@ def test_minimal_valid_env_applies_defaults():
     assert cfg.max_iterations == DEFAULT_MAX_ITERATIONS
     assert cfg.confirm_mode == DEFAULT_CONFIRM_MODE
     assert cfg.execution == DEFAULT_EXECUTION
+    assert cfg.projects_dir == DEFAULT_PROJECTS_DIR
+    assert cfg.docker_image == DEFAULT_DOCKER_IMAGE
+    assert cfg.docker_platform == DEFAULT_DOCKER_PLATFORM
 
 
 def test_all_values_parsed():
@@ -43,6 +49,9 @@ def test_all_values_parsed():
             HARNESS_MAX_ITERATIONS="12",
             HARNESS_CONFIRM_MODE="always",
             HARNESS_EXECUTION="docker",
+            HARNESS_PROJECTS_DIR="/tmp/projects",
+            HARNESS_DOCKER_IMAGE="myorg/agent-server:custom",
+            HARNESS_DOCKER_PLATFORM="linux/amd64",
         )
     )
     assert cfg.base_url == "http://localhost:11434"
@@ -50,6 +59,14 @@ def test_all_values_parsed():
     assert cfg.max_iterations == 12
     assert cfg.confirm_mode == "always"
     assert cfg.execution == "docker"
+    assert cfg.projects_dir == "/tmp/projects"
+    assert cfg.docker_image == "myorg/agent-server:custom"
+    assert cfg.docker_platform == "linux/amd64"
+
+
+def test_invalid_docker_platform_raises():
+    with pytest.raises(ConfigError, match="HARNESS_DOCKER_PLATFORM"):
+        load_config(_base_env(HARNESS_DOCKER_PLATFORM="linux/mips"))
 
 
 def test_missing_model_raises():

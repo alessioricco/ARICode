@@ -13,16 +13,23 @@ provider, model, or base URL.
 from __future__ import annotations
 
 import os
+import platform as _platform
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 CONFIRM_MODES = ("never", "always")
 EXECUTION_MODES = ("local", "docker")
+DOCKER_PLATFORMS = ("linux/amd64", "linux/arm64")
 
 DEFAULT_WORKSPACE = "."
 DEFAULT_MAX_ITERATIONS = 50
 DEFAULT_CONFIRM_MODE = "never"
 DEFAULT_EXECUTION = "local"
+DEFAULT_PROJECTS_DIR = "./projects"
+DEFAULT_DOCKER_IMAGE = "coding-agent-harness/agent-server:local"
+DEFAULT_DOCKER_PLATFORM = (
+    "linux/arm64" if _platform.machine().lower() in ("arm64", "aarch64") else "linux/amd64"
+)
 
 
 class ConfigError(ValueError):
@@ -43,6 +50,15 @@ class Config:
     max_iterations: int
     confirm_mode: str  # one of CONFIRM_MODES
     execution: str  # one of EXECUTION_MODES
+
+    # Where generated projects live: workspace defaults to plain HARNESS_WORKSPACE,
+    # but `--project NAME` (cli.py) overrides it to `projects_dir/NAME`, created if
+    # missing, so each project's generated software lands in its own subfolder.
+    projects_dir: str = DEFAULT_PROJECTS_DIR
+
+    # Only consulted when execution == "docker" (see workspace.py).
+    docker_image: str = DEFAULT_DOCKER_IMAGE
+    docker_platform: str = DEFAULT_DOCKER_PLATFORM  # one of DOCKER_PLATFORMS
 
 
 def _clean(value: str | None) -> str | None:
@@ -129,6 +145,14 @@ def load_config(env: Mapping[str, str] | None = None, *, dotenv_path: str = ".en
         choices=EXECUTION_MODES,
         name="HARNESS_EXECUTION",
     )
+    projects_dir = _clean(env.get("HARNESS_PROJECTS_DIR")) or DEFAULT_PROJECTS_DIR
+    docker_image = _clean(env.get("HARNESS_DOCKER_IMAGE")) or DEFAULT_DOCKER_IMAGE
+    docker_platform = _parse_choice(
+        env.get("HARNESS_DOCKER_PLATFORM"),
+        default=DEFAULT_DOCKER_PLATFORM,
+        choices=DOCKER_PLATFORMS,
+        name="HARNESS_DOCKER_PLATFORM",
+    )
 
     return Config(
         model=model,
@@ -138,4 +162,7 @@ def load_config(env: Mapping[str, str] | None = None, *, dotenv_path: str = ".en
         max_iterations=max_iterations,
         confirm_mode=confirm_mode,
         execution=execution,
+        projects_dir=projects_dir,
+        docker_image=docker_image,
+        docker_platform=docker_platform,
     )

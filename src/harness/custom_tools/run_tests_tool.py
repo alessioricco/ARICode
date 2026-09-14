@@ -8,6 +8,7 @@ hand-parsing raw pytest output itself.
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -32,6 +33,20 @@ def _parse_counts(summary_line: str) -> dict[str, int]:
         key = "errors" if kind.startswith("error") else kind
         counts[key] += int(num)
     return counts
+
+
+def _python_command() -> list[str]:
+    """The interpreter to run pytest with.
+
+    sys.executable is correct for a normal Python process (the same venv this
+    tool runs under). Inside a PyInstaller-frozen process — e.g. this
+    project's Docker agent-server image — it instead resolves to the frozen
+    binary itself, not an interpreter, so fall back to whatever `python3` /
+    `python` is on PATH there.
+    """
+    if getattr(sys, "frozen", False):
+        return [shutil.which("python3") or shutil.which("python") or "python3"]
+    return [sys.executable]
 
 
 class RunTestsAction(Action):
@@ -68,7 +83,7 @@ class RunTestsExecutor(ToolExecutor[RunTestsAction, RunTestsObservation]):
         self._working_dir = working_dir
 
     def __call__(self, action: RunTestsAction, conversation=None) -> RunTestsObservation:
-        cmd = [sys.executable, "-m", "pytest", "-q"]
+        cmd = [*_python_command(), "-m", "pytest", "-q"]
         if action.path:
             cmd.append(action.path)
         result = subprocess.run(
@@ -111,6 +126,13 @@ class RunTestsTool(ToolDefinition[RunTestsAction, RunTestsObservation]):
         ]
 
 
+# Registering at import time (not inside build_run_tests_tool) means importing
+# this module is enough to make the tool available — which is what lets a
+# containerized agent-server register it via `--import-modules
+# harness.custom_tools` (see docker/agent-server.Dockerfile), not just the
+# local process that calls build_run_tests_tool() directly.
+register_tool(RunTestsTool.name, RunTestsTool)
+
+
 def build_run_tests_tool() -> Tool:
-    register_tool(RunTestsTool.name, RunTestsTool)
     return Tool(name=RunTestsTool.name)

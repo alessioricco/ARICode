@@ -9,6 +9,7 @@ from openhands.sdk import Conversation, Event, LLMConvertibleEvent
 
 from .agent import build_agent
 from .config import Config, load_config
+from .workspace import build_workspace
 
 
 def run_task(task: str, cfg: Config | None = None) -> list:
@@ -20,11 +21,12 @@ def run_task(task: str, cfg: Config | None = None) -> list:
         if isinstance(event, LLMConvertibleEvent):
             messages.append(event.to_llm_message())
 
-    conversation = Conversation(
-        agent=build_agent(cfg),
-        callbacks=[on_event],
-        workspace=cfg.workspace,
-    )
-    conversation.send_message(task)
-    conversation.run()
+    with build_workspace(cfg) as workspace:
+        conversation = Conversation(
+            agent=build_agent(cfg),
+            callbacks=[on_event],
+            workspace=workspace,
+        )
+        conversation.send_message(task)
+        conversation.run()
     return messages  # last message is the final assistant output

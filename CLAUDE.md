@@ -108,6 +108,26 @@ keep `openhands-sdk`/`openhands-tools` pinned to the same version.
 - Ask before adding heavy optional pieces (Docker execution, server mode) — they
   are section 9 / "optional", not part of the core.
 
+## Keep MANUAL.md up to date
+
+`MANUAL.md` is the user-facing operational reference (setup, config reference,
+CLI flags, execution modes, projects, custom tools, known limitations,
+troubleshooting) — `README.md` is only a quickstart that points to it. Any
+change that adds or changes user-facing behavior must update the relevant
+`MANUAL.md` section **in the same change**, not as a follow-up:
+
+- A new/changed CLI flag or env var → update its table/reference entry.
+- A new execution mode or backend → update "Execution modes".
+- A new custom tool, or a change to how tools register (e.g. local vs Docker)
+  → update "Custom tools".
+- A newly discovered gotcha, bug workaround, or limitation (like the
+  `python-dotenv` inline-comment quirk, or the absolute-path requirement on
+  `file_editor`) → add it to "Known limitations" or "Troubleshooting" instead
+  of letting it live only in a commit message or PR description.
+
+Prefer editing `MANUAL.md` over re-explaining these things in README — keep
+README a short pointer, not a second copy that can drift out of sync.
+
 ## Gotchas
 
 - `openhands-sdk` and `openhands-tools` version mismatch → `ModuleNotFoundError`

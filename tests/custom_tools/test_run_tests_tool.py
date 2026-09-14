@@ -5,7 +5,9 @@ subprocess against a throwaway fixture directory, not this project's suite.
 
 from __future__ import annotations
 
-from harness.custom_tools.run_tests_tool import RunTestsAction, RunTestsExecutor
+import sys
+
+from harness.custom_tools.run_tests_tool import RunTestsAction, RunTestsExecutor, _python_command
 
 _FIXTURE = """
 def test_ok():
@@ -61,3 +63,20 @@ def test_all_passing_has_no_failures(tmp_path):
     assert observation.errors == 0
     assert observation.failures == []
     assert "1 passed" in observation.summary
+
+
+def test_python_command_uses_sys_executable_when_not_frozen(monkeypatch):
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+
+    assert _python_command() == [sys.executable]
+
+
+def test_python_command_falls_back_to_path_when_frozen(monkeypatch):
+    # Regression test: sys.executable inside a PyInstaller-frozen process (the
+    # Docker agent-server image) resolves to the frozen binary itself, not a
+    # Python interpreter — using it there silently re-invoked the agent-server
+    # binary instead of running pytest.
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}" if name == "python3" else None)
+
+    assert _python_command() == ["/usr/bin/python3"]

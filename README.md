@@ -5,14 +5,19 @@ A model-agnostic coding/software agent harness built on the
 uses tools (terminal, file editing, plus your own custom tools) in a loop until
 the task is done. Switch LLM provider/model by editing one line in `.env`.
 
+**See [`MANUAL.md`](MANUAL.md) for the full usage guide** — configuration
+reference, CLI flags, projects, execution modes (local/Docker), adding custom
+tools, and known limitations/troubleshooting. This README is a quickstart.
+
 ## Status
 
 Milestones 1, 2, 4, and 5 (see `docs/SPEC.md` section 11) are implemented and
 tested: config, LLM/tools/agent/runner wiring, a custom tool, and the CLI.
-Milestone 3 (live proof of a provider swap against a second provider/local
-model) is code-ready but not yet run live — it needs a second provider's key
-or a local model endpoint. Built by Claude Code following `docs/SPEC.md`,
-milestone by milestone; see `docs/KICKOFF.md` to start.
+Docker execution (spec section 9, originally optional) is also implemented —
+see below. Milestone 3 (live proof of a provider swap against a second
+provider/local model) is code-ready but not yet run live — it needs a second
+provider's key or a local model endpoint. Built by Claude Code following
+`docs/SPEC.md`, milestone by milestone; see `docs/KICKOFF.md` to start.
 
 ## Setup
 
@@ -31,52 +36,20 @@ them together at the same version (see `pyproject.toml`).
 
 ```bash
 uv run python -m harness "Refactor utils.py to remove duplication, then run the tests."
+
+# A named project, in its own subfolder under ./projects/, run in Docker
+uv run python -m harness "Scaffold a FastAPI service with a /health endpoint." \
+  --project my-api --execution docker
 ```
 
-`HARNESS_WORKSPACE` in `.env` (default `.`) is the directory the agent operates
-in. Note: the agent's file-editing tool requires absolute paths and does not
-resolve relative ones against the workspace itself, so for reliable runs give
-the model the absolute workspace path in the task text, or point
-`HARNESS_WORKSPACE` at the directory you want and describe files relative to
-that path explicitly in the task.
-
-### Execution mode
-
-`HARNESS_EXECUTION` (`.env`, default `local`) selects where tools run. Only
-`local` is implemented — the agent's tools run in this process/workspace
-directly. `docker` is reserved for future sandboxed/remote execution
-(see `docs/SPEC.md` section 9, optional/not yet built) and is rejected with a
-clear error if selected, rather than silently falling back to `local`. Override
-per run with `--execution`:
-
-```bash
-uv run python -m harness "..." --execution local
-```
+Full flag/env-var reference, the projects/execution-mode model, and how to
+add a custom tool: **[`MANUAL.md`](MANUAL.md)**.
 
 ## Switching model / provider
 
-Edit only `LLM_MODEL` in `.env` — no code changes:
-
-- `anthropic/claude-...` — Anthropic
-- `openai/gpt-4o` — OpenAI
-- `gemini/gemini-...` — Google
-- `ollama/llama3` (+ `LLM_BASE_URL=http://localhost:11434`) — local model
-- `openhands/claude-...` — OpenHands proxy
-
-Model IDs drift over time; verify current strings against the provider +
-LiteLLM docs if one errors. `LLM_BASE_URL` must be left with an empty value and
-no trailing text — a value-then-comment on the same line parses fine, but a
-comment-only line (blank value followed by `# comment`) is *not* stripped by
-`python-dotenv` and would otherwise be read as the literal base URL.
-
-## Adding a custom tool
-
-Custom tools follow the SDK's Action / Observation / Executor pattern and live in
-`src/harness/custom_tools/` — see `custom_tools/example_tool.py` for the
-template and `custom_tools/run_tests_tool.py` for a real one (runs the project's
-pytest suite and returns structured pass/fail results). In Claude Code, run
-`/add-tool <description>`; see `docs/SPEC.md` section 7. Then register it in
-`build_tools()` (`src/harness/tools.py`) so the agent picks it up.
+Edit only `LLM_MODEL` in `.env` — no code changes. See
+[`MANUAL.md`](MANUAL.md#switching-llm-provider--model) for supported
+prefixes and the `LLM_BASE_URL` gotcha.
 
 ## Building with Claude Code
 
@@ -88,9 +61,12 @@ with `docs/KICKOFF.md`.
 
 ```
 CLAUDE.md            # Claude Code memory + guardrails
+MANUAL.md            # full usage guide — kept up to date with every change
 docs/SPEC.md         # the build plan (milestones)
 docs/KICKOFF.md      # how to drive the build
 .claude/             # permissions + slash commands
+docker/              # agent-server.Dockerfile (docker execution image)
 src/harness/         # the harness package (built by Claude Code)
 tests/               # mirrors src/harness/
+projects/            # generated software, one subfolder per --project (git-ignored)
 ```
