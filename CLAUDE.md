@@ -12,19 +12,23 @@ so it stays **model-agnostic**.
 The full build plan lives in @docs/SPEC.md. Follow it milestone by milestone
 (section 11 of the spec). The kickoff prompt is in @docs/KICKOFF.md.
 
-**Milestone 1 is already done:** `src/harness/config.py` and
-`tests/test_config.py` are implemented and passing (15 tests). Start at
-Milestone 2.
+**For current status — which milestones are done, what's blocked, the
+optional-feature backlog, and known limitations — read @ROADMAP.md, not this
+section.** It's the living tracker; this file is durable rules/guardrails.
 
-**These four SDK APIs are already verified** against the live docs — the code in
-spec section 6/7 is correct, use it as written (no need to re-verify these):
-`LLM(usage_id=..., model=..., base_url=..., api_key=SecretStr(...))`;
-`get_default_tools()` from `openhands.tools.preset`; result capture via a
-`Conversation(callbacks=[...])` callback filtering `LLMConvertibleEvent` and
-calling `.to_llm_message()` (there is no `conversation.result`); and the custom
-tool `Action`/`Observation`/`Executor` + `register_tool` + `Tool(name=...)`
-pattern. Still `/verify-sdk` anything NOT in that list (e.g. the confirmation
-policy API, Docker workspace API).
+**SDK-drift warning:** spec section 6/7's code was verified once against the
+live docs early on, but two of those four things (`get_default_tools()`'s
+import path, and the custom-tool `Action`/`Observation`/`Executor` pattern)
+turned out to be **wrong** for the SDK version actually installed —
+`get_default_tools()` lives at `openhands.tools.preset.default`, not
+`openhands.tools.preset`, and `ToolDefinition` must be subclassed with a
+`create(cls, conv_state, **params)` classmethod, not built via a bare factory
+function. Both were corrected in code (see @ROADMAP.md "Known limitations"
+for the full story). **Do not trust spec section 6/7 as-written** — treat
+every SDK symbol as verify-first (golden rule 2), including ones this file or
+the spec previously claimed were safe. `LLM(...)` and the
+`Conversation(callbacks=[...])` / `LLMConvertibleEvent.to_llm_message()`
+pattern have held up so far, but re-verify on any SDK upgrade too.
 
 ## The golden rules
 
@@ -127,6 +131,28 @@ change that adds or changes user-facing behavior must update the relevant
 
 Prefer editing `MANUAL.md` over re-explaining these things in README — keep
 README a short pointer, not a second copy that can drift out of sync.
+
+## Keep ROADMAP.md up to date
+
+`ROADMAP.md` is internal planning memory — milestone status, the optional-
+feature backlog, known limitations from an architecture/internal angle (not
+the user-facing ones, those go in `MANUAL.md`), and a decisions log recording
+*why* key choices were made. It exists so a future session doesn't have to
+re-derive project history from conversation scrollback. Update it in the same
+change whenever:
+
+- Milestone status changes (a milestone completes, or a blocker is found).
+- An optional/backlog feature is built, scoped, or explicitly deferred.
+- A new internal/architectural limitation or SDK-drift gotcha is discovered
+  (like the `get_default_tools()` import-path or custom-tool-pattern drift
+  above) — add it there, not only as a one-off comment in code or a chat reply.
+- A non-obvious implementation decision is made that a future session would
+  otherwise have to re-litigate or rediscover — add one entry to the
+  decisions log: the choice, and the one-line reason.
+
+Keep entries terse. This file (`CLAUDE.md`) stays focused on durable rules
+that don't change often; fast-moving status lives in `ROADMAP.md` instead of
+being duplicated (and inevitably going stale) here.
 
 ## Gotchas
 

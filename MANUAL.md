@@ -128,28 +128,67 @@ uv run harness-server --host 127.0.0.1 --port 8000
 
 Returns `{"status": "ok"}`.
 
-### `POST /tasks`
+Two ways to run a task: submit-and-poll (`POST` + `GET`), for when a task
+might take too long to hold an HTTP connection open, or the client just wants
+to check in later; and streaming (`WS`), for live progress in the same
+connection. Pick whichever fits the client.
 
-Runs a task synchronously (blocks until the agent finishes) and returns the
-full result:
+### `POST /tasks` — submit, returns immediately
+
+Starts the task in a background thread and returns right away — it does
+**not** wait for the agent to finish (code generation can take anywhere from
+seconds to minutes):
 
 ```bash
 curl -X POST http://127.0.0.1:8000/tasks \
   -H "Content-Type: application/json" \
   -d '{"task": "Create HELLO.txt with the line: hi.", "project": "my-api", "execution": "docker"}'
+# -> 202 {"task_id": "f4fe313c-...", "status": "running"}
 ```
 
 Request body: `task` (required), `project` (optional, same meaning as CLI
 `--project`), `execution` (optional, same meaning as CLI `--execution`).
-Response: `{"final_message": "...", "messages": [...]}` — `messages` is every
-captured `Message`, full-fidelity (`model_dump(mode="json")`), not just text.
-`400` on a config error, `500` on a run-time error — both with a `detail`
-string, no raw traceback leaked to the client.
+Response (`202 Accepted`): `{"task_id": "...", "status": "..."}`. Config
+errors are validated synchronously before a task is even created, so those
+still come back as `400` immediately — only a run-time failure (once the
+agent is actually working) shows up later as an async `"failed"` status via
+`GET /tasks/{task_id}`, not as an HTTP error on this call.
 
-### `WS /tasks/stream`
+### `GET /tasks/{task_id}` — poll status/result
 
-Same inputs, sent as the first WebSocket message, but streams each message
-as the agent produces it instead of blocking for the whole run:
+```bash
+curl http://127.0.0.1:8000/tasks/f4fe313c-...
+```
+
+```json
+{
+  "task_id": "f4fe313c-...",
+  "status": "running",
+  "final_message": null,
+  "messages": [],
+  "error": null
+}
+```
+
+`status` is `pending` → `running` → `completed` | `failed`. `messages`
+accumulates as the agent works (so polling mid-run shows partial progress,
+not just the final result — see `_TaskRecord` in `server.py`), each entry
+full-fidelity (`Message.model_dump(mode="json")`). `final_message` is set
+once `status == "completed"`; `error` is set once `status == "failed"`.
+`404` for an unknown `task_id`.
+
+**In-memory only:** the task registry lives in the server process's memory —
+restarting the server loses all task history, and it isn't shared across
+multiple server processes/workers. Fine for a single long-running server
+process; would need a real store (Redis, a DB) to survive restarts or scale
+horizontally. Records are also never purged — long-running servers will
+accumulate them for now (see [Known limitations](#known-limitations)).
+
+### `WS /tasks/stream` — live streaming, single connection
+
+Same inputs, sent as the first WebSocket message, but pushes each message to
+the client as the agent produces it, over the connection that's already open
+— no polling needed:
 
 ```python
 import json
@@ -166,11 +205,16 @@ Each frame is `{"type": "message", ...Message.model_dump()}` or
 run finishes (normal close, code 1000) or after sending an error. The blocking
 `conversation.run()` call runs in a background thread per connection, bridged
 to the async WebSocket loop via a queue — this is why `server.py` needs
-`threading`/`queue`, not just `asyncio`.
+`threading`/`queue`, not just `asyncio`. This same thread-plus-queue pattern
+is what `POST`/`GET` build on too, just with the queue's contents parked in
+the `_TaskRecord` instead of pushed straight to a socket.
 
-**Status:** verified live — real REST call created a file via the live LLM
-and returned the full message history; real WebSocket connection streamed
-all 8 messages of a multi-step task live, then closed cleanly.
+**Status:** verified live — real `POST /tasks` returned in well under a
+second with `status: "running"` while the agent was still working; polling
+`GET /tasks/{task_id}` showed the real transition through to `"completed"`
+with the final message and full history; a real WebSocket connection
+streamed all 8 messages of a separate multi-step task live, then closed
+cleanly.
 
 ## Projects: one subfolder per generated project
 
@@ -351,6 +395,10 @@ uv run pytest -q
   adding one is additive, not a rewrite.
 - **Provider-swap live proof (spec Milestone 3) hasn't been run** — see
   [Switching LLM provider / model](#switching-llm-provider--model).
+- **Server mode's task registry is in-memory, per-process, and unbounded.**
+  `POST`/`GET /tasks` state is lost on restart, not shared across multiple
+  server processes, and completed/failed records are never purged — see
+  [Server mode](#server-mode-httpwebsocket).
 
 ## Troubleshooting
 

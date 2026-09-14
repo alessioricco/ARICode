@@ -11,14 +11,13 @@ tools, and known limitations/troubleshooting. This README is a quickstart.
 
 ## Status
 
-Milestones 1, 2, 4, and 5 (see `docs/SPEC.md` section 11) are implemented and
-tested: config, LLM/tools/agent/runner wiring, a custom tool, and the CLI.
-Docker execution and an HTTP/WebSocket server mode (spec section 9,
-originally optional) are also implemented — see `MANUAL.md`. Milestone 3
-(live proof of a provider swap against a second provider/local model) is
-code-ready but not yet run live — it needs a second provider's key or a local
-model endpoint. Built by Claude Code following `docs/SPEC.md`, milestone by
-milestone; see `docs/KICKOFF.md` to start.
+Config, LLM/tools/agent/runner wiring, a custom tool, the CLI, Docker
+execution, and an HTTP/WebSocket server mode are all implemented and tested
+— see `MANUAL.md` for usage. **For current milestone status, the
+optional-feature backlog, and known limitations, see
+[`ROADMAP.md`](ROADMAP.md)** — it's the up-to-date tracker; don't rely on
+this paragraph to stay current. Built by Claude Code following
+`docs/SPEC.md`, milestone by milestone; see `docs/KICKOFF.md` to start.
 
 ## Setup
 
@@ -55,14 +54,16 @@ prefixes and the `LLM_BASE_URL` gotcha.
 ## Building with Claude Code
 
 Project config lives in `CLAUDE.md` (memory/guardrails) and `.claude/`
-(permissions + the `/next-milestone`, `/verify-sdk`, `/add-tool` commands). Start
-with `docs/KICKOFF.md`.
+(permissions + the `/next-milestone`, `/verify-sdk`, `/add-tool` commands).
+`ROADMAP.md` is the living status/backlog/decisions tracker that goes with
+it — check it before assuming what's done. Start with `docs/KICKOFF.md`.
 
 ## Layout
 
 ```
 CLAUDE.md            # Claude Code memory + guardrails
 MANUAL.md            # full usage guide — kept up to date with every change
+ROADMAP.md           # status/backlog/decisions memory — kept up to date with every change
 docs/SPEC.md         # the build plan (milestones)
 docs/KICKOFF.md      # how to drive the build
 .claude/             # permissions + slash commands
