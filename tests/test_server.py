@@ -5,6 +5,7 @@ pattern as test_cli.py. Skips cleanly when the optional "server" extra
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 
@@ -232,3 +233,158 @@ def test_stream_task_config_error_sends_error_and_closes(monkeypatch):
 
     assert message["type"] == "error"
     assert "LLM_MODEL is required" in message["detail"]
+
+
+# --- OpenAI-compatible /v1/... ---
+
+
+def test_narrative_texts_skips_system_and_user_only():
+    # Regression test: an earlier version filtered to role == "assistant",
+    # which silently dropped everything — live testing showed the SDK puts
+    # human-readable text (including the final "finish" message) on `tool`-
+    # role messages, not `assistant`-role ones (those carry empty content +
+    # tool_calls instead).
+    messages = [
+        _FakeMessage("system", "system prompt"),
+        _FakeMessage("user", "hi"),
+        _FakeMessage("assistant", "hello"),
+        _FakeMessage("tool", "some tool output"),
+        _FakeMessage("assistant", "done"),
+    ]
+
+    assert server._narrative_texts(messages) == ["hello", "some tool output", "done"]
+
+
+def test_task_from_chat_messages_concatenates_system_and_last_user():
+    class _Msg:
+        def __init__(self, role, content):
+            self.role = role
+            self.content = content
+
+    messages = [
+        _Msg("system", "You are a helpful assistant."),
+        _Msg("user", "first question"),
+        _Msg("assistant", "first answer"),
+        _Msg("user", "second question"),
+    ]
+
+    task = server._task_from_chat_messages(messages)
+
+    assert task == "You are a helpful assistant.\n\nsecond question"
+
+
+def test_task_from_chat_messages_requires_a_user_message():
+    class _Msg:
+        def __init__(self, role, content):
+            self.role = role
+            self.content = content
+
+    with pytest.raises(ValueError, match="at least one 'user' message"):
+        server._task_from_chat_messages([_Msg("system", "context only")])
+
+
+def test_list_models_reflects_configured_model(monkeypatch):
+    monkeypatch.setattr(server, "load_config", lambda: _cfg(model="anthropic/claude-x"))
+
+    client = TestClient(server.create_app())
+    response = client.get("/v1/models")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data"][0]["id"] == "anthropic/claude-x"
+
+
+def test_chat_completions_returns_openai_shaped_response(monkeypatch):
+    calls = {}
+
+    def _fake_run_task(task, cfg=None):
+        calls["task"] = task
+        calls["cfg"] = cfg
+        # Matches reality (confirmed live): the agent's human-readable
+        # "finish" text arrives as a tool-role message, not assistant-role.
+        return [_FakeMessage("tool", "The answer is 4.")]
+
+    monkeypatch.setattr(server, "load_config", lambda: _cfg())
+    monkeypatch.setattr(server, "run_task", _fake_run_task)
+
+    client = TestClient(server.create_app())
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "system", "content": "Be terse."},
+                {"role": "user", "content": "What is 2+2?"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["object"] == "chat.completion"
+    assert body["model"] == "gpt-4o"
+    assert body["choices"][0]["message"]["content"] == "The answer is 4."
+    assert body["choices"][0]["finish_reason"] == "stop"
+    assert calls["task"] == "Be terse.\n\nWhat is 2+2?"
+    assert calls["cfg"].execution == "local"
+
+
+def test_chat_completions_without_user_message_returns_400(monkeypatch):
+    monkeypatch.setattr(server, "load_config", lambda: _cfg())
+
+    client = TestClient(server.create_app())
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-4o", "messages": [{"role": "system", "content": "context only"}]},
+    )
+
+    assert response.status_code == 400
+
+
+def test_chat_completions_config_error_returns_400(monkeypatch):
+    def _raise() -> Config:
+        raise ConfigError("LLM_MODEL is required")
+
+    monkeypatch.setattr(server, "load_config", _raise)
+
+    client = TestClient(server.create_app())
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 400
+    assert "LLM_MODEL is required" in response.json()["detail"]
+
+
+def test_chat_completions_streaming_sends_sse_chunks(monkeypatch):
+    def _fake_stream_task(task, cfg=None, on_message=None):
+        on_message(_FakeMessage("user", "echoed task, should not stream"))
+        on_message(_FakeMessage("assistant", "step one"))
+        # The real "finish" text arrives as a tool-role message (confirmed
+        # live) — it must stream, unlike system/user echoes.
+        on_message(_FakeMessage("tool", "step two"))
+
+    monkeypatch.setattr(server, "load_config", lambda: _cfg())
+    monkeypatch.setattr(server, "stream_task", _fake_stream_task)
+
+    client = TestClient(server.create_app())
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={"model": "gpt-4o", "messages": [{"role": "user", "content": "go"}], "stream": True},
+    ) as response:
+        assert response.status_code == 200
+        lines = [line for line in response.iter_lines() if line.startswith("data: ")]
+
+    payloads = [line[len("data: ") :] for line in lines]
+    assert payloads[-1] == "[DONE]"
+
+    chunks = [json.loads(p) for p in payloads[:-1]]
+    deltas = [c["choices"][0]["delta"] for c in chunks]
+
+    assert deltas[0] == {"role": "assistant"}
+    assert {"content": "step one"} in deltas
+    assert {"content": "step two"} in deltas
+    assert not any(d.get("content") == "echoed task, should not stream" for d in deltas)
+    assert chunks[-1]["choices"][0]["finish_reason"] == "stop"

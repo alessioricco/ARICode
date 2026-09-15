@@ -252,6 +252,58 @@ with the final message and full history; a real WebSocket connection
 streamed all 8 messages of a separate multi-step task live, then closed
 cleanly.
 
+### `POST /v1/chat/completions` — OpenAI-compatible adapter
+
+For tools that only know how to talk to an OpenAI-shaped endpoint (some IDE
+integrations, chat UIs), not a replacement for the native API above — a
+protocol translation layer over the same `run_task`/`stream_task`.
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "Create HELLO.txt with the line: hi."}], "project": "my-api"}'
+```
+
+- `model` (required by the wire format, echoed back in the response) **does
+  not select a provider** — the model-agnostic invariant holds here too: the
+  real model is always whatever `.env`'s `LLM_MODEL` says. There's nothing
+  meaningful to pick per-request, because our unit of behavior is the whole
+  agent (tools, skills, workspace), not a swappable raw LLM.
+- `messages`: every `system` message is concatenated as leading context; the
+  **last** `user` message becomes the task. Prior `assistant` turns are
+  **not replayed** — this harness's continuity story is the project's own
+  workspace/skills (see [Skills](#skills)), not chat history, and there's no
+  cheap way to resume a previous agent loop mid-conversation.
+- `project` / `execution` — harness extensions, same meaning as the native
+  API; ignored by strict OpenAI clients that don't send them. No
+  `agents_md` field here — use the native `POST /tasks` for that.
+- `stream: true` — Server-Sent Events instead of one blocking JSON response,
+  using the same background-thread-plus-queue pattern as `WS /tasks/stream`.
+- `GET /v1/models` reflects the real configured model (`{"data": [{"id":
+  "<cfg.model>", ...}]}`) — informative, not a real selectable list.
+
+**A real, live-caught bug worth understanding, not just a fact:** the
+obvious-looking way to extract "what did the agent say" is to filter
+messages to `role == "assistant"`. That's wrong for this SDK — confirmed by
+inspecting real output, not assumed: an `assistant`-role turn that makes a
+tool call has *empty* `content` (the call itself lives in `tool_calls`); the
+human-readable text — including the final "finish" message — arrives as a
+`tool`-role message's content instead. Filtering to `role == "assistant"`
+silently drops everything, including the final answer, and returns an empty
+string with `finish_reason: "stop"` (no error — the request "succeeds" with
+nothing in it, so a shallow test asserting exit code / status alone would
+have missed this). `_narrative_texts()` in `server.py` instead excludes only
+`system` and `user` roles, so both `assistant` text turns (when they occur)
+and `tool` result text (including the finish message) are included, matching
+what a live run's full message list actually looks like — verified directly
+via `POST /tasks`, not inferred.
+
+**Status:** verified live — both non-streaming and streaming real calls
+against the live LLM produce the correct final narrative text (confirmed
+only after finding and fixing the role-filtering bug above via a live call
+that came back with empty content despite the underlying task completing
+successfully).
+
 ## Projects: one subfolder per generated project
 
 `--project NAME` puts the agent's workspace at `HARNESS_PROJECTS_DIR/NAME`
@@ -493,10 +545,12 @@ uv run pytest -q
   `run_task` are monkeypatched, no LLM, no Docker. Includes
   `resolve_task_source()` (literal/file/URL, with `urlopen` monkeypatched —
   no real network call).
-- `tests/test_server.py` — REST/WebSocket routes via FastAPI's `TestClient`;
-  `load_config`/`run_task`/`stream_task` are monkeypatched, no LLM. Skips
-  cleanly (`pytest.importorskip("fastapi")`) when the `server` extra isn't
-  installed.
+- `tests/test_server.py` — REST/WebSocket/OpenAI-compatible routes via
+  FastAPI's `TestClient` (SSE streaming read via `client.stream(...)` +
+  `iter_lines()`); `load_config`/`run_task`/`stream_task` are monkeypatched,
+  no LLM. Includes a regression test for the `role == "assistant"` filtering
+  bug (see MANUAL.md "OpenAI-compatible adapter"). Skips cleanly
+  (`pytest.importorskip("fastapi")`) when the `server` extra isn't installed.
 - `tests/test_runner.py` — real end-to-end smoke test. **Skips cleanly** when
   `LLM_MODEL`/`LLM_API_KEY` aren't configured; when they are, it makes one
   real, cheap LLM call and asserts a file was actually created. This means a
@@ -530,6 +584,15 @@ uv run pytest -q
   `POST`/`GET /tasks` state is lost on restart, not shared across multiple
   server processes, and completed/failed records are never purged — see
   [Server mode](#server-mode-httpwebsocket).
+- **The OpenAI-compatible endpoint doesn't replay chat history** — only the
+  last `user` message becomes the task; prior `assistant` turns are dropped.
+  **Streaming is message-level, not token-level** — each SSE chunk is one
+  full agent message, not an incremental token (the underlying agent loop's
+  event callback doesn't expose token-level granularity). **`usage` is
+  always zeroed** — token counts aren't tracked across a whole agent loop.
+  **No authentication on any server-mode endpoint**, including this one —
+  an OpenAI client sending an `Authorization` header has it silently
+  ignored, not validated.
 
 ## Troubleshooting
 

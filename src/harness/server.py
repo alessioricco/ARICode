@@ -8,6 +8,7 @@ free of a FastAPI/uvicorn dependency.
 """
 
 import asyncio
+import json
 import os
 import queue
 import threading
@@ -17,10 +18,52 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .config import Config, ConfigError, load_config
-from .runner import stream_task
+from .runner import run_task, stream_task
 from .skills import write_project_context
 
 _SENTINEL = object()
+
+
+def _narrative_texts(messages: list) -> list[str]:
+    """Extract the agent's output narrative from real Message objects
+    (run_task's return value): everything except the echoed `system` prompt
+    and `user` task text.
+
+    Confirmed live, not assumed: an `assistant`-role turn that makes a tool
+    call has *empty* `content` (the call itself lives in `tool_calls`); the
+    human-readable text — including the final "finish" message — comes back
+    as a `tool`-role message's content. Filtering to `role == "assistant"`
+    (the obvious-looking first attempt) silently drops everything, including
+    the final answer.
+    """
+    texts = []
+    for message in messages:
+        if message.role in ("system", "user"):
+            continue
+        for content in message.content:
+            text = getattr(content, "text", None)
+            if text:
+                texts.append(text)
+    return texts
+
+
+def _task_from_chat_messages(chat_messages: list) -> str:
+    """Map OpenAI-style chat messages onto one harness task string.
+
+    Every `system` message is concatenated as leading context; the *last*
+    `user` message is the task itself. Prior `assistant` turns are not
+    replayed — this harness's continuity story is the project's own
+    workspace/skills (see MANUAL.md "Skills"), not chat history, and there is
+    no cheap way to resume a previous agent loop mid-conversation.
+    """
+    system_parts = [m.content for m in chat_messages if m.role == "system"]
+    user_parts = [m.content for m in chat_messages if m.role == "user"]
+    if not user_parts:
+        raise ValueError("messages must include at least one 'user' message")
+    task = user_parts[-1]
+    if system_parts:
+        task = "\n\n".join([*system_parts, task])
+    return task
 
 
 def _resolve_cfg(*, execution: str | None, project: str | None, agents_md: str | None) -> Config:
@@ -69,6 +112,7 @@ class _TaskRecord:
 def create_app():
     try:
         from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+        from fastapi.responses import StreamingResponse
         from pydantic import BaseModel
     except ImportError as exc:
         raise RuntimeError(
@@ -80,6 +124,19 @@ def create_app():
         project: str | None = None
         execution: str | None = None
         agents_md: str | None = None
+
+    class ChatMessage(BaseModel):
+        role: str
+        content: str
+
+    class ChatCompletionRequest(BaseModel):
+        model: str
+        messages: list[ChatMessage]
+        stream: bool = False
+        # Harness extensions, ignored by strict OpenAI clients that don't send
+        # them: same meaning as TaskRequest's fields.
+        project: str | None = None
+        execution: str | None = None
 
     app = FastAPI(title="Coding-Agent Harness")
     tasks: dict[str, _TaskRecord] = {}
@@ -187,6 +244,113 @@ def create_app():
             pass
         else:
             await websocket.close()
+
+    @app.get("/v1/models")
+    def list_models() -> dict[str, Any]:
+        # Reflects the real, .env-configured model — there's nothing to pick
+        # between server-side; see chat_completions()'s docstring.
+        cfg = load_config()
+        return {
+            "object": "list",
+            "data": [{"id": cfg.model, "object": "model", "owned_by": "coding-agent-harness"}],
+        }
+
+    @app.post("/v1/chat/completions")
+    def chat_completions(request: ChatCompletionRequest):
+        """OpenAI-compatible adapter over the same run_task()/stream_task().
+
+        `request.model` is accepted (required by the wire format) and echoed
+        back, but never used to select a provider — the model-agnostic
+        invariant holds here too: the actual model is whatever `.env`'s
+        LLM_MODEL says, exactly like every other interface. What a client
+        picks with `model` in this schema doesn't map onto anything we could
+        honor: our unit of behavior is the whole agent (tools, skills,
+        workspace), not a swappable raw LLM.
+
+        Chat history isn't replayed: every `system` message is concatenated
+        as leading context, the *last* `user` message is the task, and prior
+        `assistant` turns are dropped — see `_task_from_chat_messages`'s
+        docstring for why. `usage` is always zeroed; token counts aren't
+        tracked across a whole agent loop today.
+        """
+        try:
+            task = _task_from_chat_messages(request.messages)
+            cfg = _resolve_cfg(execution=request.execution, project=request.project, agents_md=None)
+        except (ConfigError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        completion_id = f"chatcmpl-{uuid.uuid4().hex}"
+        created = int(time.time())
+
+        if not request.stream:
+            try:
+                messages = run_task(task, cfg=cfg)
+            except Exception as exc:  # noqa: BLE001 - surfaced as a clean HTTP error
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+            content = "\n\n".join(_narrative_texts(messages))
+            return {
+                "id": completion_id,
+                "object": "chat.completion",
+                "created": created,
+                "model": request.model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": content},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            }
+
+        def sse_chunk(delta: dict, finish_reason: str | None = None) -> str:
+            payload = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": request.model,
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+            }
+            return f"data: {json.dumps(payload)}\n\n"
+
+        def event_stream():
+            # A plain sync generator: Starlette's StreamingResponse iterates
+            # it in a threadpool, which is exactly right since it blocks on
+            # a synchronous queue.get() — no asyncio bridging needed here,
+            # unlike the /tasks/stream WebSocket handler above.
+            events: queue.Queue = queue.Queue()
+
+            def on_message(message) -> None:
+                events.put(message)
+
+            def run() -> None:
+                try:
+                    stream_task(task, cfg=cfg, on_message=on_message)
+                except Exception as exc:  # noqa: BLE001 - surfaced in-stream, not raised
+                    events.put(exc)
+                finally:
+                    events.put(_SENTINEL)
+
+            threading.Thread(target=run, daemon=True).start()
+
+            yield sse_chunk({"role": "assistant"})
+            while True:
+                item = events.get()
+                if item is _SENTINEL:
+                    break
+                if isinstance(item, Exception):
+                    yield sse_chunk({"content": f"[error: {item}]"})
+                    continue
+                if item.role in ("system", "user"):
+                    continue
+                for content in item.content:
+                    text = getattr(content, "text", None)
+                    if text:
+                        yield sse_chunk({"content": text})
+            yield sse_chunk({}, finish_reason="stop")
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     return app
 

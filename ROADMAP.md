@@ -18,7 +18,7 @@ build plan. This file is the living, evolving companion to that static plan.
 | 3 | Provider-swap live proof | **Blocked** — needs a 2nd provider key or a local model endpoint; user chose to skip rather than provide one |
 | 4 | Custom tool + test | Done — `run_tests_tool` |
 | 5 | CLI + README + execution-mode flag | Done, verified live |
-| 6 | Optional (section 9) | Docker execution: done. Server mode: done (REST async submit+poll, WS streaming). Skills (formerly "microagents"): done — shared catalog + per-project AGENTS.md. OpenAI-compatible endpoint: not started. |
+| 6 | Optional (section 9) | Docker execution: done. Server mode: done (REST async submit+poll, WS streaming, OpenAI-compatible `/v1/chat/completions`). Skills (formerly "microagents"): done — shared catalog + per-project AGENTS.md. Every section-9 item is now done. |
 
 ## What's implemented
 
@@ -40,8 +40,9 @@ build plan. This file is the living, evolving companion to that static plan.
   `ghcr.io/openhands/agent-server`, built automatically on first use.
 - `server.py` — `GET /health`, `POST /tasks` (async, returns immediately),
   `GET /tasks/{id}` (poll status/partial progress/result), `WS /tasks/stream`
-  (live streaming). All three task-facing endpoints share one background
-  thread + callback pattern.
+  (live streaming), `GET /v1/models` + `POST /v1/chat/completions`
+  (OpenAI-compatible adapter, streaming and non-streaming). All task-facing
+  endpoints share one background thread + callback pattern.
 - `skills.py` — two mechanisms, don't conflate them: `load_skill_catalog()`
   loads the shared, reusable, trigger-based catalog (`skills/`, arbitrary
   subfolders for classification) into every agent's `AgentContext`
@@ -52,10 +53,6 @@ build plan. This file is the living, evolving companion to that static plan.
 
 ## Backlog — optional / not yet built
 
-- **OpenAI-compatible endpoint** — a `/v1/chat/completions`-shaped adapter for
-  tools that only know how to talk to "OpenAI," distinct from the REST/WS
-  server. Would need a translation layer mapping chat-completions
-  requests/streaming to `run_task`/`stream_task` and back.
 - **ECS/EC2 execution backends** — `workspace.py`'s `build_workspace()` is the
   single dispatch point; adding one is a new branch there plus a new
   `HARNESS_EXECUTION` value, not a rewrite. Nothing beyond `docker` exists.
@@ -96,6 +93,19 @@ build plan. This file is the living, evolving companion to that static plan.
   around in `run_tests_tool.py` (`_python_command()`); worth remembering for
   any *future* subprocess-spawning custom tool meant to run under `docker`
   execution.
+- **A `Message`'s `role` does not indicate where its human-readable text
+  lives.** An `assistant`-role message that makes a tool call has *empty*
+  `content` (the call is in `tool_calls`); the actual text — including the
+  agent's final "finish" message — comes back as a `tool`-role message's
+  content instead. Confirmed by dumping a real run's full message list via
+  `POST /tasks`, not assumed from any docstring. First implementation of
+  `server.py`'s OpenAI-compatible adapter filtered to `role == "assistant"`
+  (the obvious-looking choice) and silently returned empty content on every
+  real call despite the underlying task succeeding — caught only by live
+  verification, not by the unit tests (which used fakes shaped by the same
+  wrong assumption). Fixed by excluding only `system`/`user` roles instead.
+  Any *future* code that reads `Message.role` to decide what's "the answer"
+  should re-check this rather than assume `assistant` is where output lives.
 
 ## Decisions log (why, not just what)
 
@@ -156,3 +166,21 @@ build plan. This file is the living, evolving companion to that static plan.
   shell tricks; a REST/WS API caller is already writing code and can
   read/fetch content itself before the request — adding the same resolution
   server-side would just be a second, redundant place doing the same thing.
+- **OpenAI-compatible endpoint mounted on the same `server.py`/`create_app()`,
+  not a separate app or module.** One running process, multiple protocol
+  surfaces — matches how most "agent gateway" tools are actually deployed,
+  and reuses `_resolve_cfg`/the background-thread-plus-queue pattern already
+  built for `/tasks` and `/tasks/stream` instead of a parallel
+  implementation. `model` in the request is accepted and echoed back (wire
+  format requires the field) but never used to select a provider — consistent
+  with the model-agnostic invariant holding through every interface, not
+  just the native one.
+- **Streaming narrates every non-echo message, not just the final answer.**
+  Considered emitting only the last message once the run finishes (simpler,
+  but defeats the point of "streaming" for a multi-minute agent run) versus
+  streaming every `assistant`/`tool`-role message as it arrives (chosen) —
+  gives real-time progress matching what the CLI's visualizer and
+  `WS /tasks/stream` already show, at the cost of a chat UI seeing tool
+  output narrated inline rather than one clean final message. The
+  non-streaming path uses the same `_narrative_texts()` concatenation for
+  consistency between the two modes.
