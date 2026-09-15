@@ -12,8 +12,10 @@ from harness.config import (
     DEFAULT_DOCKER_PLATFORM,
     DEFAULT_EXECUTION,
     DEFAULT_MAX_ITERATIONS,
+    DEFAULT_MAX_VERIFY_RETRIES,
     DEFAULT_PROJECTS_DIR,
     DEFAULT_SKILLS_DIR,
+    DEFAULT_VERIFY_TESTS,
     DEFAULT_WORKSPACE,
     Config,
     ConfigError,
@@ -42,6 +44,8 @@ def test_minimal_valid_env_applies_defaults():
     assert cfg.skills_dir == DEFAULT_SKILLS_DIR
     assert cfg.docker_image == DEFAULT_DOCKER_IMAGE
     assert cfg.docker_platform == DEFAULT_DOCKER_PLATFORM
+    assert cfg.verify_tests == DEFAULT_VERIFY_TESTS
+    assert cfg.max_verify_retries == DEFAULT_MAX_VERIFY_RETRIES
 
 
 def test_all_values_parsed():
@@ -56,6 +60,8 @@ def test_all_values_parsed():
             HARNESS_SKILLS_DIR="/tmp/skills",
             HARNESS_DOCKER_IMAGE="myorg/agent-server:custom",
             HARNESS_DOCKER_PLATFORM="linux/amd64",
+            HARNESS_VERIFY_TESTS="never",
+            HARNESS_MAX_VERIFY_RETRIES="5",
         )
     )
     assert cfg.base_url == "http://localhost:11434"
@@ -67,6 +73,19 @@ def test_all_values_parsed():
     assert cfg.skills_dir == "/tmp/skills"
     assert cfg.docker_image == "myorg/agent-server:custom"
     assert cfg.docker_platform == "linux/amd64"
+    assert cfg.verify_tests == "never"
+    assert cfg.max_verify_retries == 5
+
+
+def test_invalid_verify_tests_raises():
+    with pytest.raises(ConfigError, match="HARNESS_VERIFY_TESTS"):
+        load_config(_base_env(HARNESS_VERIFY_TESTS="sometimes"))
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "abc"])
+def test_invalid_max_verify_retries_raises(bad):
+    with pytest.raises(ConfigError, match="HARNESS_MAX_VERIFY_RETRIES"):
+        load_config(_base_env(HARNESS_MAX_VERIFY_RETRIES=bad))
 
 
 def test_invalid_docker_platform_raises():

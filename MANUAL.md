@@ -76,6 +76,8 @@ template with every variable documented inline.
 | `HARNESS_SKILLS_DIR` | `./skills` | Shared skill catalog loaded into every agent's `AgentContext` — see [Skills](#skills). |
 | `HARNESS_DOCKER_IMAGE` | `coding-agent-harness/agent-server:local` | Image used for `HARNESS_EXECUTION=docker`. Built automatically on first use. |
 | `HARNESS_DOCKER_PLATFORM` | auto-detected from host arch | `linux/amd64` \| `linux/arm64`. Leave blank to auto-detect (arm64 on Apple Silicon, amd64 otherwise). |
+| `HARNESS_VERIFY_TESTS` | `always` | `always` \| `never` — after the agent finishes, re-run the project's own tests and, if they fail, send the real failure back and let the agent retry. See [Test verification](#test-verification). |
+| `HARNESS_MAX_VERIFY_RETRIES` | `2` | How many automated fix-and-retry cycles `HARNESS_VERIFY_TESTS=always` allows before giving up. |
 
 ## CLI reference
 
@@ -343,6 +345,17 @@ agent (`os.path.abspath` in `cli.py`) — this matters because the agent's
 `file_editor` tool requires absolute paths and does not resolve relative ones
 against the workspace itself (see [Known limitations](#known-limitations)).
 
+### README.md
+
+Every task instructs the agent (via `agent.py`'s system-prompt suffix, see
+[Known limitations](#known-limitations)) to leave a `README.md` at the
+project root with concrete install/run instructions for whatever it built,
+before it finishes — not just when a task explicitly asks for one. This is a
+prompt-level instruction, not something the harness generates or enforces
+itself: the harness has no way to know how to run arbitrary generated code,
+only the agent that built it does. Since it's a soft instruction, a given run
+can still finish without one — check the project folder if in doubt.
+
 ## Skills
 
 Two distinct mechanisms — don't conflate them. "Microagents" in spec section
@@ -542,11 +555,20 @@ Custom tools follow the SDK's Action / Observation / Executor pattern and
 live in `src/harness/custom_tools/`:
 
 - `custom_tools/example_tool.py` — template, not wired into the agent.
-- `custom_tools/run_tests_tool.py` — real tool (`run_tests`): runs this
-  project's pytest suite (or a single file/node id) as a subprocess and
-  returns structured pass/fail/error counts, a one-line summary, and parsed
-  `FAILED`/`ERROR` node ids, instead of making the agent shell out through
-  the terminal tool and hand-parse raw output.
+- `custom_tools/run_tests_tool.py` — real tool (`run_tests`): verifies the
+  project actually works, instead of making the agent shell out through the
+  terminal tool and hand-parse raw output. Auto-detects what kind of project
+  it's pointed at (searching a few directories deep, since a scaffolded
+  project can land nested below the workspace root): a Python project
+  (`pyproject.toml`/`setup.py`/`setup.cfg` present, or neither marker found)
+  runs its pytest suite (or a single file/node id) and returns structured
+  pass/fail/error counts, a one-line summary, and parsed `FAILED`/`ERROR`
+  node ids; a Node project with a `package.json` `build` script (Vite,
+  Next.js, CRA, etc.) instead runs `npm run build` and returns its exit
+  status plus raw output — this is what actually exercises the
+  bundler/transpiler and catches a compile/parse error, which pytest cannot
+  see in a non-Python project. See [Known limitations](#known-limitations)
+  for what's still out of scope (JS test runners like jest/vitest).
 
 To add a new one (in Claude Code: `/add-tool <description>`; see
 `docs/SPEC.md` section 7 for the pattern):
@@ -565,6 +587,53 @@ To add a new one (in Claude Code: `/add-tool <description>`; see
    rebuild the Docker image (see [Execution modes](#execution-modes)).
 4. Add `tests/custom_tools/test_<name>_tool.py`: construct the `Action`, call
    the executor directly, assert on the `Observation` — no LLM, no network.
+
+## Test verification
+
+The agent's own "finish" message is not proof a task actually succeeded —
+confirmed live twice, in two different ways:
+
+1. Asked to build a Tower of Hanoi game, the agent called `finish` saying
+   tests needed "further debugging," but the real bug was an
+   `IndentationError` in the file it wrote (it didn't even parse), which it
+   had never actually re-run to check.
+2. Asked to scaffold a Vite/React booking site, the agent called `finish`
+   declaring the site "set up successfully" while `App.tsx` had a JSX parse
+   error (adjacent JSX elements not wrapped in an enclosing tag/fragment) —
+   the dev server it claimed was "running" would fail to render at all.
+   Pytest-only verification didn't catch this either: run against that
+   project, pytest reports "no tests collected" (exit code `5`), which was
+   (rightly, for a Python project) treated as "nothing to verify," but was a
+   false pass here since the project isn't Python at all.
+
+`HARNESS_VERIFY_TESTS=always` (the default) is a safety net for exactly
+this: after every run, `runner.py` re-runs the project's own verification
+itself — directly through `run_tests_tool`'s executor, no LLM call involved.
+Which check that is depends on the project (see [Custom
+tools](#custom-tools)): a Python project's pytest suite, or a Node project's
+`npm run build` (which is what actually would have caught case 2 above —
+building the site failed with the JSX parse error before any dev-server
+"success" was reported). Either way:
+
+- **Passes, or (pytest only) no tests found** (pytest exit code `0` or `5`;
+  `npm run build` exit code `0`): nothing happens, the run's result stands
+  as-is.
+- **Fails**: the real failure output (not the agent's characterization of
+  it) is sent back as a new user message, and the agent runs again to fix
+  it. This repeats up to `HARNESS_MAX_VERIFY_RETRIES` times (default `2`).
+- **Still failing after the retry budget**: the harness appends its own
+  message to the run's output saying so plainly, rather than letting the
+  agent's last (possibly optimistic) message stand as the final word.
+
+Set `HARNESS_VERIFY_TESTS=never` to skip this — e.g. for a task with no
+Python tests and no Node build step, where the extra invocation is pure
+overhead, or while iterating quickly and you'd rather review failures
+yourself. Same scope limitation as `run_tests` itself (see [Known
+limitations](#known-limitations)): a project that is neither a
+pytest-detectable Python project nor a Node project with a `build` script
+reports nothing found and is left alone, it's not treated as a failure —
+this notably still doesn't cover a JS project's own test runner
+(jest/vitest/etc.), only its build/compile step.
 
 ## Testing
 
@@ -605,12 +674,41 @@ uv run pytest -q
   `--project` mitigates this by always resolving the workspace to an absolute
   path, but the task text or the model's own exploration still needs to
   arrive at the right absolute file path.
-- **`run_tests` assumes a pytest-based project with pytest installed.**
-  True for this repo's own suite under `local` execution. Under `docker`
-  execution, `pytest` is not installed in the image, and a `--project`
-  workspace holds newly generated software, not this repo — so `run_tests`
-  isn't currently meaningful there. Making it generic (detect the project's
-  actual test runner, install its dependencies) is unscoped.
+- **`run_tests` only knows two project kinds: pytest and Node-build.** It
+  detects a Python project (`pyproject.toml`/`setup.py`/`setup.cfg`, or
+  neither marker found — the original always-try-pytest default) and a Node
+  project with a `package.json` `build` script (runs `npm run build`,
+  catching compile/parse errors — see [Custom tools](#custom-tools) and
+  [Test verification](#test-verification)). It does **not** run a JS
+  project's own test runner (jest/vitest/etc.) — only its build step — and
+  it does not cover any other ecosystem (Go, Rust, Ruby, ...). Under
+  `docker` execution, neither `pytest` nor `npm` is guaranteed to be
+  installed in the image, and a `--project` workspace holds newly generated
+  software, not this repo — so `run_tests` may not be meaningful there
+  depending on what's actually in the image. Making this fully generic
+  (detect any project's actual test runner, install its dependencies) is
+  unscoped. The `HARNESS_VERIFY_TESTS` safety net reuses this same executor
+  and inherits the same scope: it runs against the local, bind-mounted
+  project directory using the harness's own Python/pytest or `npm` install
+  (this works even under `docker` execution, since `workspace.py`
+  bind-mounts the project directory onto the host either way) — but a
+  project that's neither kind just reports nothing found and is left alone.
+- **`local` execution's terminal has no real PTY unless `tmux` is installed
+  on the host** — without it, the SDK falls back to a subprocess-based
+  terminal (a startup warning says so). `docker` execution is unaffected:
+  `tmux` ships in the published `ghcr.io/openhands/agent-server` base image
+  already (confirmed live: `tmux -V` → `3.5a`, works as the container's
+  non-root `openhands` user), so no Dockerfile change was needed there.
+  Regardless of PTY support, an interactive CLI prompt (an `npm
+  create`/scaffolding wizard, a package manager's "confirm install?" prompt)
+  has no human to answer it, so it will still auto-cancel — often with exit
+  code `0` and nothing actually created — unless the agent avoids it in the
+  first place. The agent is instructed (`agent.py`'s
+  `_NONINTERACTIVE_TOOLING_SUFFIX`) to use each tool's non-interactive/CI
+  flags and to verify a command's actual result instead of trusting its exit
+  code, but this is a soft prompt-level instruction, not a hard guarantee.
+  Install `tmux` locally with `brew install tmux` (macOS) / `apt-get install
+  tmux` (Linux) for terminal stability generally.
 - **`HARNESS_CONFIRM_MODE=always`** is parsed and validated but not yet wired
   to an actual confirmation gate in `agent.py` — the SDK's confirmation
   policy API hasn't been verified against this SDK version yet

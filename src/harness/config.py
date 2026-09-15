@@ -20,6 +20,7 @@ from dataclasses import dataclass, replace
 CONFIRM_MODES = ("never", "always")
 EXECUTION_MODES = ("local", "docker")
 DOCKER_PLATFORMS = ("linux/amd64", "linux/arm64")
+VERIFY_TESTS_MODES = ("always", "never")
 
 DEFAULT_WORKSPACE = "."
 DEFAULT_MAX_ITERATIONS = 50
@@ -27,6 +28,8 @@ DEFAULT_CONFIRM_MODE = "never"
 DEFAULT_EXECUTION = "local"
 DEFAULT_PROJECTS_DIR = "./projects"
 DEFAULT_SKILLS_DIR = "./skills"
+DEFAULT_VERIFY_TESTS = "always"
+DEFAULT_MAX_VERIFY_RETRIES = 2
 DEFAULT_DOCKER_IMAGE = "coding-agent-harness/agent-server:local"
 DEFAULT_DOCKER_PLATFORM = (
     "linux/arm64" if _platform.machine().lower() in ("arm64", "aarch64") else "linux/amd64"
@@ -64,6 +67,15 @@ class Config:
     # Only consulted when execution == "docker" (see workspace.py).
     docker_image: str = DEFAULT_DOCKER_IMAGE
     docker_platform: str = DEFAULT_DOCKER_PLATFORM  # one of DOCKER_PLATFORMS
+
+    # Post-hoc test verification (see runner.py's _verify_tests_and_retry):
+    # after the agent finishes, the harness itself re-runs the project's
+    # pytest suite (no LLM involved) and, if it fails, sends the real
+    # failure output back and lets the agent try again, up to this many
+    # times — a safety net for trusting the agent's own "it's done" self-
+    # report, which live testing showed can be wrong (see ROADMAP.md).
+    verify_tests: str = DEFAULT_VERIFY_TESTS  # one of VERIFY_TESTS_MODES
+    max_verify_retries: int = DEFAULT_MAX_VERIFY_RETRIES
 
 
 def _clean(value: str | None) -> str | None:
@@ -159,6 +171,17 @@ def load_config(env: Mapping[str, str] | None = None, *, dotenv_path: str = ".en
         choices=DOCKER_PLATFORMS,
         name="HARNESS_DOCKER_PLATFORM",
     )
+    verify_tests = _parse_choice(
+        env.get("HARNESS_VERIFY_TESTS"),
+        default=DEFAULT_VERIFY_TESTS,
+        choices=VERIFY_TESTS_MODES,
+        name="HARNESS_VERIFY_TESTS",
+    )
+    max_verify_retries = _parse_positive_int(
+        env.get("HARNESS_MAX_VERIFY_RETRIES"),
+        default=DEFAULT_MAX_VERIFY_RETRIES,
+        name="HARNESS_MAX_VERIFY_RETRIES",
+    )
 
     return Config(
         model=model,
@@ -172,6 +195,8 @@ def load_config(env: Mapping[str, str] | None = None, *, dotenv_path: str = ".en
         skills_dir=skills_dir,
         docker_image=docker_image,
         docker_platform=docker_platform,
+        verify_tests=verify_tests,
+        max_verify_retries=max_verify_retries,
     )
 
 
