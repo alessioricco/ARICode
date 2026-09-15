@@ -80,7 +80,8 @@ template with every variable documented inline.
 ## CLI reference
 
 ```bash
-uv run python -m harness "<task>" [--execution {local,docker}] [--project NAME] [--agents-md TEXT]
+uv run python -m harness "<task>" [--execution {local,docker}] [--project NAME] \
+    [--agents-md TEXT] [--model MODEL] [--api-key KEY] [--base-url URL]
 ```
 
 (Also installed as a console script: `harness "<task>" ...`, once the package
@@ -98,6 +99,12 @@ is installed via `uv pip install -e .`.)
   (created if missing). See [Projects](#projects-one-subfolder-per-generated-project).
 - `--agents-md TEXT` — writes `TEXT` as this project's `AGENTS.md`. Requires
   `--project`. See [Skills](#skills).
+- `--model MODEL` / `--api-key KEY` / `--base-url URL` — override
+  `LLM_MODEL` / `LLM_API_KEY` / `LLM_BASE_URL` for this run only, without
+  touching `.env`. Useful for running the same task against different
+  models/providers to compare results. Any combination may be given; an
+  omitted flag keeps `.env`'s value. See
+  [Switching LLM provider / model](#switching-llm-provider--model).
 
 Exit code is `0` on success, `1` on a configuration error or a run-time error
 (printed to stderr as `Configuration error: ...` / `Error: ...` — not a raw
@@ -120,6 +127,12 @@ uv run python -m harness ./tasks/build-the-thing.md --project my-api
 
 # Task text fetched from a URL
 uv run python -m harness https://example.com/tasks/build-the-thing.md --project my-api
+
+# Compare two models on the exact same task, without touching .env
+uv run python -m harness "Add input validation to the signup form." --project my-api \
+    --model anthropic/claude-sonnet-4-5-20250929
+uv run python -m harness "Add input validation to the signup form." --project my-api \
+    --model openai/gpt-4o --api-key "$OPENAI_API_KEY"
 ```
 
 ### Task source resolution
@@ -183,7 +196,10 @@ curl -X POST http://127.0.0.1:8000/tasks \
 Request body: `task` (required), `project` (optional, same meaning as CLI
 `--project`), `execution` (optional, same meaning as CLI `--execution`),
 `agents_md` (optional, same meaning as CLI `--agents-md` — requires `project`
-in the same request). Response (`202 Accepted`): `{"task_id": "...", "status":
+in the same request), `model` / `api_key` / `base_url` (all optional, same
+meaning as CLI `--model` / `--api-key` / `--base-url` — override
+`LLM_MODEL`/`LLM_API_KEY`/`LLM_BASE_URL` for this request only, without
+touching `.env`). Response (`202 Accepted`): `{"task_id": "...", "status":
 "..."}`. Config errors — including `agents_md` without `project` — are
 validated synchronously before a task is even created, so those still come
 back as `400` immediately — only a run-time failure (once the agent is
@@ -222,7 +238,7 @@ accumulate them for now (see [Known limitations](#known-limitations)).
 
 ### `WS /tasks/stream` — live streaming, single connection
 
-Same inputs, sent as the first WebSocket message, but pushes each message to
+Same inputs (including `model`/`api_key`/`base_url`), sent as the first WebSocket message, but pushes each message to
 the client as the agent produces it, over the connection that's already open
 — no polling needed:
 
@@ -265,10 +281,10 @@ curl -X POST http://127.0.0.1:8000/v1/chat/completions \
 ```
 
 - `model` (required by the wire format, echoed back in the response) **does
-  not select a provider** — the model-agnostic invariant holds here too: the
-  real model is always whatever `.env`'s `LLM_MODEL` says. There's nothing
-  meaningful to pick per-request, because our unit of behavior is the whole
-  agent (tools, skills, workspace), not a swappable raw LLM.
+  not select a provider** — the real model defaults to whatever `.env`'s
+  `LLM_MODEL` says, and `model` isn't a safe stand-in for an explicit
+  override since a strict OpenAI client's value there may not be a
+  LiteLLM-style `"provider/model"` id at all.
 - `messages`: every `system` message is concatenated as leading context; the
   **last** `user` message becomes the task. Prior `assistant` turns are
   **not replayed** — this harness's continuity story is the project's own
@@ -277,6 +293,11 @@ curl -X POST http://127.0.0.1:8000/v1/chat/completions \
 - `project` / `execution` — harness extensions, same meaning as the native
   API; ignored by strict OpenAI clients that don't send them. No
   `agents_md` field here — use the native `POST /tasks` for that.
+- `llm_model` / `llm_api_key` / `llm_base_url` — harness extensions, the
+  actual per-request LLM overrides (same meaning as `POST /tasks`'
+  `model`/`api_key`/`base_url`). Kept separate from the wire-mandated `model`
+  field above precisely because that field can't be trusted to hold a real
+  provider/model id — see [Switching LLM provider / model](#switching-llm-provider--model).
 - `stream: true` — Server-Sent Events instead of one blocking JSON response,
   using the same background-thread-plus-queue pattern as `WS /tasks/stream`.
 - `GET /v1/models` reflects the real configured model (`{"data": [{"id":
@@ -484,6 +505,25 @@ hits are example strings in error messages and docstrings).
 - `gemini/gemini-...` — Google
 - `ollama/llama3` (+ `LLM_BASE_URL=http://localhost:11434`) — local model
 - `openhands/claude-...` — OpenHands proxy
+
+### Per-request override (no `.env` edit)
+
+To try the *same* task against a different model/provider without touching
+`.env` — e.g. comparing how two models handle one task — every entry point
+accepts an explicit, optional override instead:
+
+- CLI: `--model` / `--api-key` / `--base-url` (see [CLI reference](#cli-reference)).
+- `POST /tasks` and `WS /tasks/stream`: `model` / `api_key` / `base_url` fields.
+- `POST /v1/chat/completions`: `llm_model` / `llm_api_key` / `llm_base_url`
+  (kept separate from the wire-mandated `model` field — see
+  [`POST /v1/chat/completions`](#post-v1chatcompletions--openai-compatible-adapter)).
+
+Any subset may be given; an omitted field keeps `.env`'s value for that one
+setting (e.g. passing only `--model` keeps the configured `LLM_API_KEY`). This
+is `harness.config.override_llm()` under the hood — it returns a modified
+copy of the resolved `Config`, `.env` itself is never touched, so the override
+applies to that one run only. This is additive to, not a replacement for, the
+`.env`-only invariant above: with no override given, behavior is unchanged.
 
 Model IDs drift over time; verify current strings against the provider +
 LiteLLM docs if one errors.

@@ -138,6 +138,48 @@ def test_create_task_agents_md_with_project_writes_file(monkeypatch, tmp_path):
     assert (tmp_path / "myapp" / "AGENTS.md").read_text() == "This project uses FastAPI."
 
 
+def test_create_task_with_model_override_swaps_llm_without_env(monkeypatch):
+    calls = {}
+
+    def _fake_stream_task(task, cfg=None, on_message=None):
+        calls["cfg"] = cfg
+
+    monkeypatch.setattr(server, "load_config", lambda: _cfg(model="anthropic/claude-x"))
+    monkeypatch.setattr(server, "stream_task", _fake_stream_task)
+
+    client = TestClient(server.create_app())
+    response = client.post(
+        "/tasks",
+        json={
+            "task": "do something",
+            "model": "openai/gpt-4o",
+            "api_key": "sk-other",
+            "base_url": "http://localhost:11434",
+        },
+    )
+    _wait_for_status(client, response.json()["task_id"])
+
+    assert calls["cfg"].model == "openai/gpt-4o"
+    assert calls["cfg"].api_key == "sk-other"
+    assert calls["cfg"].base_url == "http://localhost:11434"
+
+
+def test_create_task_without_override_keeps_configured_model(monkeypatch):
+    calls = {}
+
+    def _fake_stream_task(task, cfg=None, on_message=None):
+        calls["cfg"] = cfg
+
+    monkeypatch.setattr(server, "load_config", lambda: _cfg(model="anthropic/claude-x"))
+    monkeypatch.setattr(server, "stream_task", _fake_stream_task)
+
+    client = TestClient(server.create_app())
+    response = client.post("/tasks", json={"task": "do something"})
+    _wait_for_status(client, response.json()["task_id"])
+
+    assert calls["cfg"].model == "anthropic/claude-x"
+
+
 def test_create_task_config_error_returns_400_immediately(monkeypatch):
     def _raise() -> Config:
         raise ConfigError("LLM_MODEL is required")
@@ -218,6 +260,24 @@ def test_stream_task_sends_messages_then_closes(monkeypatch):
     assert first["type"] == "message"
     assert first["content"][0]["text"] == "step one"
     assert second["content"][0]["text"] == "done"
+
+
+def test_stream_task_with_model_override_swaps_llm(monkeypatch):
+    calls = {}
+
+    def _fake_stream_task(task, cfg=None, on_message=None):
+        calls["cfg"] = cfg
+        on_message(_FakeMessage("assistant", "done"))
+
+    monkeypatch.setattr(server, "load_config", lambda: _cfg(model="anthropic/claude-x"))
+    monkeypatch.setattr(server, "stream_task", _fake_stream_task)
+
+    client = TestClient(server.create_app())
+    with client.websocket_connect("/tasks/stream") as ws:
+        ws.send_json({"task": "do something", "model": "openai/gpt-4o"})
+        ws.receive_json()
+
+    assert calls["cfg"].model == "openai/gpt-4o"
 
 
 def test_stream_task_config_error_sends_error_and_closes(monkeypatch):
@@ -327,6 +387,54 @@ def test_chat_completions_returns_openai_shaped_response(monkeypatch):
     assert body["choices"][0]["finish_reason"] == "stop"
     assert calls["task"] == "Be terse.\n\nWhat is 2+2?"
     assert calls["cfg"].execution == "local"
+
+
+def test_chat_completions_llm_model_override_swaps_model_not_wire_field(monkeypatch):
+    calls = {}
+
+    def _fake_run_task(task, cfg=None):
+        calls["cfg"] = cfg
+        return [_FakeMessage("tool", "The answer is 4.")]
+
+    monkeypatch.setattr(server, "load_config", lambda: _cfg(model="anthropic/claude-x"))
+    monkeypatch.setattr(server, "run_task", _fake_run_task)
+
+    client = TestClient(server.create_app())
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "What is 2+2?"}],
+            "llm_model": "openai/gpt-4o",
+            "llm_api_key": "sk-other",
+        },
+    )
+
+    assert response.status_code == 200
+    # The OpenAI wire field is still just echoed back...
+    assert response.json()["model"] == "gpt-4o"
+    # ...while the actual run used the llm_* override, not request.model.
+    assert calls["cfg"].model == "openai/gpt-4o"
+    assert calls["cfg"].api_key == "sk-other"
+
+
+def test_chat_completions_without_llm_override_keeps_configured_model(monkeypatch):
+    calls = {}
+
+    def _fake_run_task(task, cfg=None):
+        calls["cfg"] = cfg
+        return [_FakeMessage("tool", "hi")]
+
+    monkeypatch.setattr(server, "load_config", lambda: _cfg(model="anthropic/claude-x"))
+    monkeypatch.setattr(server, "run_task", _fake_run_task)
+
+    client = TestClient(server.create_app())
+    client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert calls["cfg"].model == "anthropic/claude-x"
 
 
 def test_chat_completions_without_user_message_returns_400(monkeypatch):

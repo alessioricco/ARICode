@@ -23,16 +23,21 @@ build plan. This file is the living, evolving companion to that static plan.
 ## What's implemented
 
 - `config.py` — env parsing, model-agnostic (`LLM_MODEL` prefix selects provider).
+  `override_llm(cfg, model=, api_key=, base_url=)` returns a copy of `Config`
+  with only the given fields replaced — the per-request/per-run override
+  mechanism shared by `cli.py` and `server.py` (see MANUAL.md "Switching LLM
+  provider / model" → "Per-request override").
 - `llm.py` / `tools.py` / `agent.py` — SDK wiring; default preset tools + `run_tests`.
 - `runner.py` — `stream_task()` (callback-per-message) is the shared primitive;
   `run_task()` wraps it for the CLI's collect-and-return use case.
 - `custom_tools/run_tests_tool.py` — runs pytest, structured results; registers
   at import time (not just on demand) so both `local` execution and the
   Docker image's `--import-modules` mechanism pick it up.
-- `cli.py` — `python -m harness "<task>" [--execution] [--project] [--agents-md]`.
-  `task` is resolved via `resolve_task_source()`: http(s) URL (fetched) or an
-  existing local file (read) take precedence over literal text. CLI-only —
-  server mode's `task` field does not do this resolution.
+- `cli.py` — `python -m harness "<task>" [--execution] [--project] [--agents-md]
+  [--model] [--api-key] [--base-url]`. `task` is resolved via
+  `resolve_task_source()`: http(s) URL (fetched) or an existing local file
+  (read) take precedence over literal text. CLI-only — server mode's `task`
+  field does not do this resolution.
 - `workspace.py` — single dispatch point for execution backends
   (`build_workspace(cfg)`); `local` returns a plain path, `docker` returns a
   `DockerWorkspace`, both as context managers so cleanup is automatic.
@@ -42,7 +47,11 @@ build plan. This file is the living, evolving companion to that static plan.
   `GET /tasks/{id}` (poll status/partial progress/result), `WS /tasks/stream`
   (live streaming), `GET /v1/models` + `POST /v1/chat/completions`
   (OpenAI-compatible adapter, streaming and non-streaming). All task-facing
-  endpoints share one background thread + callback pattern.
+  endpoints share one background thread + callback pattern. `POST /tasks` /
+  `WS /tasks/stream` accept optional `model`/`api_key`/`base_url` overrides
+  (via `config.override_llm`); `/v1/chat/completions` accepts the same thing
+  under `llm_model`/`llm_api_key`/`llm_base_url` — kept distinct from its
+  wire-mandated `model` field, which stays echo-only (see decisions log).
 - `skills.py` — two mechanisms, don't conflate them: `load_skill_catalog()`
   loads the shared, reusable, trigger-based catalog (`skills/`, arbitrary
   subfolders for classification) into every agent's `AgentContext`
@@ -175,6 +184,25 @@ build plan. This file is the living, evolving companion to that static plan.
   format requires the field) but never used to select a provider — consistent
   with the model-agnostic invariant holding through every interface, not
   just the native one.
+- **Per-request LLM override (`--model`/`--api-key`/`--base-url` and the
+  server equivalents) added as an explicit, separate mechanism — not by
+  repurposing `/v1/chat/completions`'s `model` field.** Motivation: let a
+  caller run the same task against different providers/models to compare
+  results, without editing `.env` (still the default/no-override behavior —
+  this is additive, not a replacement for the model-agnostic invariant).
+  Considered making the OpenAI-compatible endpoint's `model` field actually
+  select the provider once explicitly overridden — rejected: that field is
+  wire-mandated and a strict OpenAI client may put an arbitrary non-LiteLLM
+  string there (`"gpt-4o"` with no prefix), so trusting it to double as a
+  real override risks either breaking normal clients or silently ignoring
+  the override depending on how it's parsed. Added `llm_model`/
+  `llm_api_key`/`llm_base_url` as separate extension fields on
+  `ChatCompletionRequest` instead — `model` keeps its prior "echoed only"
+  contract unchanged, matching the decision entry directly above. `TaskRequest`
+  (no OpenAI wire-format constraint) uses the plain `model`/`api_key`/
+  `base_url` names directly. Both routes end in the one new
+  `config.override_llm()` helper, called from `cli.py` and `server.py`'s
+  `_resolve_cfg`, so the override logic itself isn't duplicated.
 - **Streaming narrates every non-echo message, not just the final answer.**
   Considered emitting only the last message once the run finishes (simpler,
   but defeats the point of "streaming" for a multi-minute agent run) versus

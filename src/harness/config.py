@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 import platform as _platform
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 CONFIRM_MODES = ("never", "always")
 EXECUTION_MODES = ("local", "docker")
@@ -173,3 +173,32 @@ def load_config(env: Mapping[str, str] | None = None, *, dotenv_path: str = ".en
         docker_image=docker_image,
         docker_platform=docker_platform,
     )
+
+
+def override_llm(
+    cfg: Config,
+    *,
+    model: str | None = None,
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> Config:
+    """Return a copy of `cfg` with LLM_MODEL/LLM_API_KEY/LLM_BASE_URL overridden.
+
+    Lets a single call (CLI flag or a server request field) swap provider/model
+    for one run without touching `.env` — e.g. to compare how two models handle
+    the same task. Only arguments that are not None are applied; anything else
+    keeps `cfg`'s existing value. Does not re-validate the
+    api_key-or-base_url-required rule from `load_config` — `cfg` already
+    satisfied it, and an override is additive, not a fresh load.
+    """
+    updates: dict[str, str | None] = {}
+    if model is not None:
+        cleaned_model = _clean(model)
+        if cleaned_model is None:
+            raise ConfigError("Model override must not be blank.")
+        updates["model"] = cleaned_model
+    if api_key is not None:
+        updates["api_key"] = _clean(api_key)
+    if base_url is not None:
+        updates["base_url"] = _clean(base_url)
+    return replace(cfg, **updates) if updates else cfg

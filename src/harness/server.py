@@ -17,7 +17,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from .config import Config, ConfigError, load_config
+from .config import Config, ConfigError, load_config, override_llm
 from .runner import run_task, stream_task
 from .skills import write_project_context
 
@@ -66,11 +66,21 @@ def _task_from_chat_messages(chat_messages: list) -> str:
     return task
 
 
-def _resolve_cfg(*, execution: str | None, project: str | None, agents_md: str | None) -> Config:
+def _resolve_cfg(
+    *,
+    execution: str | None,
+    project: str | None,
+    agents_md: str | None,
+    model: str | None = None,
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> Config:
     if agents_md is not None and project is None:
         raise ValueError("agents_md requires project")
 
     cfg = load_config()
+    if model is not None or api_key is not None or base_url is not None:
+        cfg = override_llm(cfg, model=model, api_key=api_key, base_url=base_url)
     if execution is not None:
         cfg = replace(cfg, execution=execution)
     if project is not None:
@@ -124,6 +134,11 @@ def create_app():
         project: str | None = None
         execution: str | None = None
         agents_md: str | None = None
+        # Per-request LLM overrides — swap provider/model for just this task
+        # without touching .env (e.g. to compare models on the same task).
+        model: str | None = None
+        api_key: str | None = None
+        base_url: str | None = None
 
     class ChatMessage(BaseModel):
         role: str
@@ -137,6 +152,14 @@ def create_app():
         # them: same meaning as TaskRequest's fields.
         project: str | None = None
         execution: str | None = None
+        # `model` above is the OpenAI wire field — always echoed back, never
+        # used to pick a provider (see /v1/chat/completions docstring). These
+        # are the actual per-request LLM overrides, kept separate so a strict
+        # OpenAI client's `model` value (which may not be a LiteLLM-style
+        # "provider/model" id) can never accidentally change what runs.
+        llm_model: str | None = None
+        llm_api_key: str | None = None
+        llm_base_url: str | None = None
 
     app = FastAPI(title="Coding-Agent Harness")
     tasks: dict[str, _TaskRecord] = {}
@@ -175,7 +198,12 @@ def create_app():
         # async "failed" status instead of an HTTP error.
         try:
             cfg = _resolve_cfg(
-                execution=request.execution, project=request.project, agents_md=request.agents_md
+                execution=request.execution,
+                project=request.project,
+                agents_md=request.agents_md,
+                model=request.model,
+                api_key=request.api_key,
+                base_url=request.base_url,
             )
         except (ConfigError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -210,7 +238,12 @@ def create_app():
             payload = await websocket.receive_json()
             request = TaskRequest(**payload)
             cfg = _resolve_cfg(
-                execution=request.execution, project=request.project, agents_md=request.agents_md
+                execution=request.execution,
+                project=request.project,
+                agents_md=request.agents_md,
+                model=request.model,
+                api_key=request.api_key,
+                base_url=request.base_url,
             )
         except (ConfigError, ValueError) as exc:
             await websocket.send_json({"type": "error", "detail": str(exc)})
@@ -261,11 +294,15 @@ def create_app():
 
         `request.model` is accepted (required by the wire format) and echoed
         back, but never used to select a provider — the model-agnostic
-        invariant holds here too: the actual model is whatever `.env`'s
-        LLM_MODEL says, exactly like every other interface. What a client
-        picks with `model` in this schema doesn't map onto anything we could
-        honor: our unit of behavior is the whole agent (tools, skills,
-        workspace), not a swappable raw LLM.
+        invariant holds here too: the actual model defaults to whatever
+        `.env`'s LLM_MODEL says, exactly like every other interface, and
+        `request.model` isn't a safe stand-in for an explicit override since
+        a strict OpenAI client's value there may not be a LiteLLM-style
+        "provider/model" id at all. Callers who want to experiment with a
+        different provider/model for a request, without touching `.env`, use
+        the separate `llm_model`/`llm_api_key`/`llm_base_url` extension
+        fields instead — same override mechanism as `TaskRequest`'s
+        `model`/`api_key`/`base_url`.
 
         Chat history isn't replayed: every `system` message is concatenated
         as leading context, the *last* `user` message is the task, and prior
@@ -275,7 +312,14 @@ def create_app():
         """
         try:
             task = _task_from_chat_messages(request.messages)
-            cfg = _resolve_cfg(execution=request.execution, project=request.project, agents_md=None)
+            cfg = _resolve_cfg(
+                execution=request.execution,
+                project=request.project,
+                agents_md=None,
+                model=request.llm_model,
+                api_key=request.llm_api_key,
+                base_url=request.llm_base_url,
+            )
         except (ConfigError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

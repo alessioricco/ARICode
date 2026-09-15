@@ -18,6 +18,7 @@ from harness.config import (
     Config,
     ConfigError,
     load_config,
+    override_llm,
 )
 
 
@@ -129,3 +130,47 @@ def test_config_is_frozen():
     cfg = load_config(_base_env())
     with pytest.raises(Exception):
         cfg.model = "openai/gpt-4o"  # type: ignore[misc]
+
+
+def test_override_llm_applies_only_given_fields():
+    cfg = load_config(_base_env())
+
+    overridden = override_llm(cfg, model="openai/gpt-4o")
+
+    assert overridden.model == "openai/gpt-4o"
+    assert overridden.api_key == cfg.api_key
+    assert overridden.base_url == cfg.base_url
+
+
+def test_override_llm_applies_all_fields():
+    cfg = load_config(_base_env())
+
+    overridden = override_llm(
+        cfg, model="ollama/llama3", api_key=None, base_url="http://localhost:11434"
+    )
+
+    assert overridden.model == "ollama/llama3"
+    assert overridden.base_url == "http://localhost:11434"
+    # api_key=None means "not overridden", not "cleared" -> unchanged.
+    assert overridden.api_key == cfg.api_key
+
+
+def test_override_llm_no_args_returns_same_config():
+    cfg = load_config(_base_env())
+
+    assert override_llm(cfg) == cfg
+
+
+def test_override_llm_blank_model_raises():
+    cfg = load_config(_base_env())
+
+    with pytest.raises(ConfigError, match="Model override must not be blank"):
+        override_llm(cfg, model="   ")
+
+
+def test_override_llm_does_not_mutate_original():
+    cfg = load_config(_base_env())
+
+    override_llm(cfg, model="openai/gpt-4o")
+
+    assert cfg.model == "anthropic/claude-sonnet-4-5-20250929"

@@ -11,7 +11,7 @@ import urllib.request
 from dataclasses import replace
 from urllib.parse import urlparse
 
-from .config import ConfigError, load_config
+from .config import ConfigError, load_config, override_llm
 from .runner import run_task
 from .skills import write_project_context
 
@@ -74,6 +74,24 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--model",
+        default=None,
+        help=(
+            "Override LLM_MODEL for this run only, without touching .env — "
+            "e.g. to compare how two models handle the same task."
+        ),
+    )
+    parser.add_argument(
+        "--api-key",
+        default=None,
+        help="Override LLM_API_KEY for this run only (pairs with --model when swapping providers).",
+    )
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="Override LLM_BASE_URL for this run only (e.g. to point at a local model endpoint).",
+    )
+    parser.add_argument(
         "--project",
         default=None,
         help=(
@@ -108,6 +126,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         cfg = load_config()
+        if args.model is not None or args.api_key is not None or args.base_url is not None:
+            cfg = override_llm(cfg, model=args.model, api_key=args.api_key, base_url=args.base_url)
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 1

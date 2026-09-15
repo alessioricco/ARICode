@@ -229,6 +229,79 @@ def test_agents_md_with_project_writes_file(monkeypatch, tmp_path):
     assert (tmp_path / "myapp" / "AGENTS.md").read_text() == "This project uses FastAPI."
 
 
+def test_model_flag_overrides_llm_model_without_touching_env(monkeypatch):
+    calls = {}
+
+    def _fake_run_task(task, cfg=None):
+        calls["cfg"] = cfg
+        return []
+
+    monkeypatch.setattr(
+        cli, "load_config", lambda: _cfg(model="anthropic/claude-sonnet-4-5-20250929")
+    )
+    monkeypatch.setattr(cli, "run_task", _fake_run_task)
+
+    exit_code = cli.main(["do something", "--model", "openai/gpt-4o"])
+
+    assert exit_code == 0
+    assert calls["cfg"].model == "openai/gpt-4o"
+
+
+def test_api_key_and_base_url_flags_override_config(monkeypatch):
+    calls = {}
+
+    def _fake_run_task(task, cfg=None):
+        calls["cfg"] = cfg
+        return []
+
+    monkeypatch.setattr(cli, "load_config", lambda: _cfg())
+    monkeypatch.setattr(cli, "run_task", _fake_run_task)
+
+    exit_code = cli.main(
+        [
+            "do something",
+            "--api-key",
+            "sk-other",
+            "--base-url",
+            "http://localhost:11434",
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls["cfg"].api_key == "sk-other"
+    assert calls["cfg"].base_url == "http://localhost:11434"
+
+
+def test_no_llm_override_flags_leaves_config_untouched(monkeypatch):
+    calls = {}
+
+    def _fake_run_task(task, cfg=None):
+        calls["cfg"] = cfg
+        return []
+
+    monkeypatch.setattr(cli, "load_config", lambda: _cfg())
+    monkeypatch.setattr(cli, "run_task", _fake_run_task)
+
+    exit_code = cli.main(["do something"])
+
+    assert exit_code == 0
+    assert calls["cfg"].model == "openai/gpt-4o"
+    assert calls["cfg"].api_key == "key"
+
+
+def test_blank_model_override_reports_config_error(monkeypatch, capsys):
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("run_task should not be called")
+
+    monkeypatch.setattr(cli, "load_config", lambda: _cfg())
+    monkeypatch.setattr(cli, "run_task", _fail_if_called)
+
+    exit_code = cli.main(["do something", "--model", "   "])
+
+    assert exit_code == 1
+    assert "Model override must not be blank" in capsys.readouterr().err
+
+
 def test_execution_flag_overrides_configured_docker_default(monkeypatch):
     calls = {}
 
