@@ -1,5 +1,4 @@
-"""CLI entry point: `python -m harness "<task>"` (also installed as `harness`).
-"""
+"""CLI entry point: `python -m harness "<task>"` (also installed as `harness`)."""
 
 from __future__ import annotations
 
@@ -69,8 +68,7 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=("local", "docker"),
         default=None,
         help=(
-            "Override HARNESS_EXECUTION for this run. Defaults to the value in "
-            ".env (or 'local')."
+            "Override HARNESS_EXECUTION for this run. Defaults to the value in .env (or 'local')."
         ),
     )
     parser.add_argument(
@@ -159,6 +157,21 @@ def main(argv: list[str] | None = None) -> int:
             text = getattr(content, "text", None)
             if text:
                 print(text)
+
+    # Make the terminal outcome explicit rather than letting the agent's own
+    # (possibly optimistic) last message stand as the only signal — see
+    # runner.py's TaskOutcome / MANUAL.md "Test verification". A task whose
+    # verification failed and couldn't be fixed, made no observable progress
+    # on a fix attempt, kept timing out, or whose run never reached a
+    # coherent finish, is a nonzero exit; "inconclusive" (nothing runnable
+    # to check) is not an error but is still printed so it isn't mistaken
+    # for a confirmed pass.
+    outcome = messages.outcome
+    print(f"\nVerification: {outcome.verification_state}")
+    for note in outcome.completion_contract.limitations:
+        print(f"  - {note}")
+    if outcome.verification_state in ("retry_exhausted", "no_progress", "timed_out", "stuck"):
+        return 1
     return 0
 
 

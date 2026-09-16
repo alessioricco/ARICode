@@ -13,10 +13,24 @@ import pytest
 
 pytest.importorskip("fastapi")
 
-from fastapi.testclient import TestClient  # noqa: E402
+from fastapi.testclient import TestClient
 
-from harness import server  # noqa: E402
-from harness.config import Config, ConfigError  # noqa: E402
+from harness import server
+from harness.config import Config, ConfigError
+from harness.runner import CompletionContract, TaskOutcome
+
+
+def _fake_outcome(verification_state: str = "verified", limitations=()) -> TaskOutcome:
+    """The `TaskOutcome` `stream_task` now returns — fakes standing in for
+    it in these tests need to return one instead of `None` so `server.py`'s
+    `outcome.verification_state` access doesn't blow up."""
+    contract = CompletionContract(
+        goal="do something",
+        acceptance_criteria=[],
+        verification_checks=[],
+        limitations=list(limitations),
+    )
+    return TaskOutcome(verification_state=verification_state, completion_contract=contract)
 
 
 def _wait_for_status(client, task_id, *, timeout=2.0):
@@ -73,6 +87,7 @@ def test_create_task_returns_immediately_with_pending_status(monkeypatch):
         calls["task"] = task
         calls["cfg"] = cfg
         on_message(_FakeMessage("assistant", "all done"))
+        return _fake_outcome()
 
     monkeypatch.setattr(server, "load_config", lambda: _cfg())
     monkeypatch.setattr(server, "stream_task", _fake_stream_task)
@@ -88,6 +103,8 @@ def test_create_task_returns_immediately_with_pending_status(monkeypatch):
     final = _wait_for_status(client, task_id)
     assert final["status"] == "completed"
     assert final["final_message"] == "all done"
+    assert final["verification_state"] == "verified"
+    assert final["completion_contract"] is not None
     assert calls["task"] == "do something"
     assert calls["cfg"].execution == "local"
 
@@ -97,6 +114,7 @@ def test_create_task_with_project_creates_subfolder(monkeypatch, tmp_path):
 
     def _fake_stream_task(task, cfg=None, on_message=None):
         calls["cfg"] = cfg
+        return _fake_outcome()
 
     monkeypatch.setattr(server, "load_config", lambda: _cfg(projects_dir=str(tmp_path)))
     monkeypatch.setattr(server, "stream_task", _fake_stream_task)
@@ -123,7 +141,7 @@ def test_create_task_agents_md_without_project_returns_400(monkeypatch):
 
 def test_create_task_agents_md_with_project_writes_file(monkeypatch, tmp_path):
     def _fake_stream_task(task, cfg=None, on_message=None):
-        return None
+        return _fake_outcome()
 
     monkeypatch.setattr(server, "load_config", lambda: _cfg(projects_dir=str(tmp_path)))
     monkeypatch.setattr(server, "stream_task", _fake_stream_task)
@@ -131,7 +149,11 @@ def test_create_task_agents_md_with_project_writes_file(monkeypatch, tmp_path):
     client = TestClient(server.create_app())
     response = client.post(
         "/tasks",
-        json={"task": "do something", "project": "myapp", "agents_md": "This project uses FastAPI."},
+        json={
+            "task": "do something",
+            "project": "myapp",
+            "agents_md": "This project uses FastAPI.",
+        },
     )
     _wait_for_status(client, response.json()["task_id"])
 
@@ -143,6 +165,7 @@ def test_create_task_with_model_override_swaps_llm_without_env(monkeypatch):
 
     def _fake_stream_task(task, cfg=None, on_message=None):
         calls["cfg"] = cfg
+        return _fake_outcome()
 
     monkeypatch.setattr(server, "load_config", lambda: _cfg(model="anthropic/claude-x"))
     monkeypatch.setattr(server, "stream_task", _fake_stream_task)
@@ -169,6 +192,7 @@ def test_create_task_without_override_keeps_configured_model(monkeypatch):
 
     def _fake_stream_task(task, cfg=None, on_message=None):
         calls["cfg"] = cfg
+        return _fake_outcome()
 
     monkeypatch.setattr(server, "load_config", lambda: _cfg(model="anthropic/claude-x"))
     monkeypatch.setattr(server, "stream_task", _fake_stream_task)
@@ -209,6 +233,28 @@ def test_get_task_reports_failure(monkeypatch):
     assert final["final_message"] is None
 
 
+def test_get_task_status_completed_does_not_imply_verification_passed(monkeypatch):
+    # `status` only ever meant "the run didn't raise" — a task whose
+    # verification retries were exhausted still ends with status
+    # "completed" (no exception), so a poller must check
+    # `verification_state`, not just `status`, to know whether it actually
+    # succeeded. See MANUAL.md "Test verification".
+    def _fake_stream_task(task, cfg=None, on_message=None):
+        return _fake_outcome(verification_state="retry_exhausted", limitations=["pytest: 2 failed"])
+
+    monkeypatch.setattr(server, "load_config", lambda: _cfg())
+    monkeypatch.setattr(server, "stream_task", _fake_stream_task)
+
+    client = TestClient(server.create_app())
+    task_id = client.post("/tasks", json={"task": "do something"}).json()["task_id"]
+
+    final = _wait_for_status(client, task_id)
+
+    assert final["status"] == "completed"
+    assert final["verification_state"] == "retry_exhausted"
+    assert final["completion_contract"]["limitations"] == ["pytest: 2 failed"]
+
+
 def test_get_task_unknown_id_returns_404():
     client = TestClient(server.create_app())
 
@@ -226,6 +272,7 @@ def test_get_task_reflects_partial_progress(monkeypatch):
         started.set()
         finish.wait(timeout=2)
         on_message(_FakeMessage("assistant", "step two"))
+        return _fake_outcome()
 
     monkeypatch.setattr(server, "load_config", lambda: _cfg())
     monkeypatch.setattr(server, "stream_task", _fake_stream_task)
@@ -247,6 +294,7 @@ def test_stream_task_sends_messages_then_closes(monkeypatch):
     def _fake_stream_task(task, cfg=None, on_message=None):
         on_message(_FakeMessage("assistant", "step one"))
         on_message(_FakeMessage("assistant", "done"))
+        return _fake_outcome()
 
     monkeypatch.setattr(server, "load_config", lambda: _cfg())
     monkeypatch.setattr(server, "stream_task", _fake_stream_task)
@@ -262,12 +310,32 @@ def test_stream_task_sends_messages_then_closes(monkeypatch):
     assert second["content"][0]["text"] == "done"
 
 
+def test_stream_task_sends_a_final_result_event_with_verification_state(monkeypatch):
+    def _fake_stream_task(task, cfg=None, on_message=None):
+        on_message(_FakeMessage("assistant", "done"))
+        return _fake_outcome(verification_state="retry_exhausted", limitations=["pytest: 2 failed"])
+
+    monkeypatch.setattr(server, "load_config", lambda: _cfg())
+    monkeypatch.setattr(server, "stream_task", _fake_stream_task)
+
+    client = TestClient(server.create_app())
+    with client.websocket_connect("/tasks/stream") as ws:
+        ws.send_json({"task": "do something"})
+        ws.receive_json()  # the "message" event
+        result = ws.receive_json()
+
+    assert result["type"] == "result"
+    assert result["verification_state"] == "retry_exhausted"
+    assert result["completion_contract"]["limitations"] == ["pytest: 2 failed"]
+
+
 def test_stream_task_with_model_override_swaps_llm(monkeypatch):
     calls = {}
 
     def _fake_stream_task(task, cfg=None, on_message=None):
         calls["cfg"] = cfg
         on_message(_FakeMessage("assistant", "done"))
+        return _fake_outcome()
 
     monkeypatch.setattr(server, "load_config", lambda: _cfg(model="anthropic/claude-x"))
     monkeypatch.setattr(server, "stream_task", _fake_stream_task)

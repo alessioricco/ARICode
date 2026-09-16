@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from harness.agent import (
     _AUTONOMOUS_SUFFIX,
+    _LIFECYCLE_SKILLS_SUFFIX,
     _NONINTERACTIVE_TOOLING_SUFFIX,
     _README_SUFFIX,
     _VERIFY_BEFORE_FINISH_SUFFIX,
@@ -37,6 +38,7 @@ def test_agent_context_carries_all_system_message_suffix_policies():
     assert _README_SUFFIX in suffix
     assert _NONINTERACTIVE_TOOLING_SUFFIX in suffix
     assert _VERIFY_BEFORE_FINISH_SUFFIX in suffix
+    assert _LIFECYCLE_SKILLS_SUFFIX in suffix
 
 
 def test_autonomous_suffix_tells_agent_not_to_wait_for_the_user():
@@ -94,6 +96,31 @@ def test_verify_before_finish_suffix_requires_running_before_claiming_done():
     assert "finish" in lowered
     assert "run" in lowered
     assert "verify" in lowered
+
+
+def test_lifecycle_skills_suffix_names_repository_discovery_explicitly():
+    # repository-discovery is the one skill this suffix names directly (it
+    # has no single obvious trigger word the way the others do) — a
+    # typo'd/paraphrased name here would be silently useless.
+    assert "`repository-discovery`" in _LIFECYCLE_SKILLS_SUFFIX
+
+
+def test_lifecycle_skills_suffix_tells_agent_to_inspect_before_editing():
+    lowered = _LIFECYCLE_SKILLS_SUFFIX.lower()
+    assert "before editing" in lowered
+    assert "inspect" in lowered
+
+
+def test_lifecycle_skills_suffix_allows_skipping_trivial_tasks():
+    lowered = _LIFECYCLE_SKILLS_SUFFIX.lower()
+    assert "skip" in lowered
+    assert "one-line fix" in lowered or "too small" in lowered
+
+
+def test_lifecycle_skills_suffix_says_skills_are_not_a_substitute_for_verification():
+    lowered = _LIFECYCLE_SKILLS_SUFFIX.lower()
+    assert "not a substitute" in lowered or "never a substitute" in lowered
+    assert "verify" in lowered or "run the checks" in lowered
 
 
 def test_agent_context_still_loads_project_skills():

@@ -28,33 +28,73 @@ build plan. This file is the living, evolving companion to that static plan.
   mechanism shared by `cli.py` and `server.py` (see MANUAL.md "Switching LLM
   provider / model" → "Per-request override").
 - `llm.py` / `tools.py` / `agent.py` — SDK wiring; default preset tools + `run_tests`.
-  `agent.py`'s `AgentContext.system_message_suffix` also carries four
+  `agent.py`'s `AgentContext.system_message_suffix` also carries five
   behavioral policies, not just SDK plumbing: `_AUTONOMOUS_SUFFIX` (see
   "Known limitations" below), `_README_SUFFIX`, which tells every agent to
   leave a `README.md` with concrete run instructions in the project root
   before finishing even when the task didn't ask for one (see MANUAL.md
   "Projects" → "README.md"), `_NONINTERACTIVE_TOOLING_SUFFIX`, which tells
   the agent to use CLI tools' non-interactive/CI flags and not blindly retry
-  a command that produced no visible result, and `_VERIFY_BEFORE_FINISH_SUFFIX`,
+  a command that produced no visible result, `_VERIFY_BEFORE_FINISH_SUFFIX`,
   which tells the agent to actually run its tests/program before calling
   `finish` rather than describing untested claims as fact (see "Known
-  limitations" below for both).
+  limitations" below for both), and `_LIFECYCLE_SKILLS_SUFFIX` (formerly
+  `_SDLC_SKILLS_SUFFIX`), which tells the agent to inspect the repository
+  before editing, apply a lifecycle skill's guidance even off-trigger when
+  the situation still calls for it, skip a skill for trivial changes, and
+  treat skill guidance as never a substitute for actually running the
+  checks it describes — see "Decisions log" below for why this no longer
+  needs to name skills individually or reference `invoke_skill`.
 - `runner.py` — `stream_task()` (callback-per-message) is the shared primitive;
   `run_task()` wraps it for the CLI's collect-and-return use case. Also now
   wires `cfg.max_iterations` into `Conversation(max_iteration_per_run=...)`
   (previously unset, silently defaulting to the SDK's 500 — see "Known
-  limitations" below), and runs `_verify_tests_and_retry()` after every
-  `conversation.run()`: a harness-side, no-LLM re-run of the project's own
-  tests via `run_tests_tool`'s executor directly, resending real failures and
-  re-running the agent (bounded by `HARNESS_MAX_VERIFY_RETRIES`) instead of
-  trusting the agent's self-report — see MANUAL.md "Test verification".
-- `custom_tools/run_tests_tool.py` — verifies the project actually works;
-  auto-detects pytest (Python markers, or none found — original default) vs.
-  a Node project with a `package.json` `build` script (`npm run build`),
-  structured results either way; registers at import time (not just on
-  demand) so both `local` execution and the Docker image's
-  `--import-modules` mechanism pick it up. See "Decisions log" below for why
-  this generalization was added.
+  limitations" below). Both now always return a `TaskOutcome` (`run_task`'s
+  is attached as `.outcome` on the `TaskResult` list subclass it returns, so
+  every pre-existing `list[Message]` caller keeps working unchanged) — the
+  bounded, six-state verification verdict from `_verify_and_report()`, a
+  harness-side, no-LLM re-run of the project's own checks via
+  `run_tests_tool.run_full_verification()`, resending real failures/timeout
+  notices and re-running the agent (bounded by `HARNESS_MAX_VERIFY_RETRIES`,
+  retried for both `failed` and `timed_out` `VerificationRun` states)
+  instead of trusting the agent's self-report, and checking
+  `conversation.state.execution_status` before verifying (and again after
+  every retry) so a stuck/errored run is reported as such rather than
+  silently "completed" — see MANUAL.md "Test verification" and "Decisions
+  log" below for the full architecture.
+- `custom_tools/run_tests_tool.py` — a language-neutral verification
+  pipeline in four explicit, independently-tested stages: **project
+  detection** (`detect_project()`, one marker-file walk covering Python/
+  Node/Go/Rust/Java-Maven/Java-Gradle, falling back to Python for bare
+  source with no manifest, else `"unknown"`), **verification-plan
+  discovery** (`discover_verification_plan()`, pure — decides which
+  commands apply per language, never inventing one a project doesn't
+  configure), **command execution** (`execute_check()`, the only
+  subprocess-spawning stage, returns one of five `CheckOutcome.status`
+  values: `passed`/`failed`/`skipped`/`unavailable`/`timed_out`), and
+  **aggregation** (`VerificationRun`, whose `.state` property is
+  `verified`/`failed`/`inconclusive`/`timed_out` — a secondary check can
+  only ever pull `verified` down to `failed`, never promote it). The
+  agent-facing `run_tests` tool (unchanged contract: always exactly one
+  check) keeps its original rich Python/Node behavior and reuses stages 1–3
+  for Go/Rust/Java. `run_full_verification()` orchestrates all four stages
+  for the harness's own post-hoc loop. Registers at import time (not just
+  on demand) so both `local` execution and the Docker image's
+  `--import-modules` mechanism pick it up. `CheckSpec` also supports a
+  `precomputed: CheckOutcome | None` field for a pure, no-subprocess static
+  check (`execute_check` returns it directly) — first used by
+  `entrypoint-ordering` (see the matching Known-limitations/decisions-log
+  entries): an `ast`-based check that a Python entry-point file's own
+  `if __name__ == "__main__":` guard is its last top-level statement,
+  catching a bug class a passing pytest suite structurally cannot (a name
+  referenced from inside the guard that isn't defined until later in the
+  file — invisible on `import`, real when the script is run directly).
+  `_python_plan()` also now runs each detected entry point directly
+  (`python <file>`, stdin closed via `execute_check`'s
+  `stdin=subprocess.DEVNULL` — now the default for every check, not just
+  this one, closing a latent hang risk). See "Decisions log" below for why
+  this generalization was scoped this way, and for what's genuinely
+  verified vs. only detected per language.
 - `cli.py` — `python -m harness "<task>" [--execution] [--project] [--agents-md]
   [--model] [--api-key] [--base-url]`. `task` is resolved via
   `resolve_task_source()`: http(s) URL (fetched) or an existing local file
@@ -80,12 +120,16 @@ build plan. This file is the living, evolving companion to that static plan.
   (`agent.py`); `write_project_context()` writes a caller-supplied,
   project-specific `AGENTS.md` (CLI `--agents-md`, REST `agents_md`, both
   requiring `--project`/`project`). See MANUAL.md "Skills" for the full
-  writeup and CLAUDE.md-linked rationale. The catalog now includes five
-  downloaded (not authored) SDLC-lifecycle `SKILL.md` skills —
-  `requirements-analysis`, `implementation-planning`,
-  `testing-and-verification`, `security-review`, `release-readiness` —
-  adapted from the MIT-licensed `addyosmani/agent-skills` repo; see
-  "Decisions log" below for the sourcing/mapping rationale.
+  writeup and CLAUDE.md-linked rationale. The catalog now includes eight
+  authored, legacy-format (`triggers:`/`paths:`) lifecycle skills under
+  `skills/lifecycle/` — `repository-discovery`, `requirements-analysis`,
+  `implementation-planning`, `testing-and-verification`,
+  `debugging-and-failure-repair`, `security-review`,
+  `documentation-and-operational-readiness`,
+  `completion-and-release-readiness` — language/framework-independent,
+  keyword/path-triggered (not `SKILL.md`/`invoke_skill`-based); these
+  supersede an earlier five-skill `SKILL.md` set downloaded from
+  `addyosmani/agent-skills` (see "Decisions log" below for why).
 
 ## Backlog — optional / not yet built
 
@@ -96,14 +140,24 @@ build plan. This file is the living, evolving companion to that static plan.
   connected to an actual pause-before-tool-call gate. Needs `/verify-sdk` on
   the SDK's confirmation-policy API first (explicitly called out as
   unverified in `CLAUDE.md`).
-- **`run_tests` generalization — partially done.** Now detects pytest vs. a
-  Node project with a `package.json` `build` script and runs `npm run build`
-  for the latter (see "Decisions log" and "Known limitations" below); this
-  covers the concrete failure that motivated it (a JSX parse error that
-  pytest-only verification couldn't see). **Still not done:** a JS project's
-  actual test runner (jest/vitest/etc.) is not detected or run — only its
-  build/compile step — and no ecosystem beyond Python/Node is covered (Go,
-  Rust, Ruby, ...). Detecting an arbitrary project's real test runner and
+- **`run_tests`/verification generalization — now covers six languages,
+  still not fully generic.** Was Python(pytest)/Node(`npm run build`)-only;
+  now detects and verifies Python, Node, Go, Rust, and Java
+  (Maven/Gradle) — see "Decisions log" and MANUAL.md "Custom tools" for the
+  full per-language table. This covers the concrete failures that
+  motivated it (a JSX parse error pytest-only verification couldn't see;
+  "no tests found" being silently treated as proof of correctness) and the
+  explicit follow-up ask (many languages, not just two). **Still not
+  done/genuinely out of scope:** a JS project's actual test runner
+  (jest/vitest/etc.) isn't config-parsed — only a defined `scripts.test` is
+  run as opaque; no other Python lint/typecheck tool (flake8, pylint,
+  pyright) is detected, only ruff/mypy; no JS/TS lint tool (ESLint, etc.,
+  see the matching backlog entry below) is detected; no ecosystem beyond
+  these six (Ruby, PHP, .NET, C/C++, ...); Java verification is detection-
+  only in this project's own dev/CI environment and the Docker
+  agent-server image, since neither ships a Maven/Gradle toolchain (see
+  MANUAL.md "Known limitations" for the precise verified-vs-detected
+  breakdown). Detecting an arbitrary project's real test runner and
   installing its deps remains a real scope question, not a quick fix.
 - **Server-mode task registry persistence/cleanup** — in-memory, per-process,
   unbounded. Needs at least a TTL-based purge; a real store (Redis/DB) for
@@ -120,22 +174,21 @@ build plan. This file is the living, evolving companion to that static plan.
   loop). Only worth building if the prompt-only fix proves insufficient on
   re-test; needs its own stop-condition/cost-control design (a runaway
   "continue" loop is a real risk) before it's more than a sketch.
-- **Surface `conversation.state.execution_status == STUCK` to the caller.**
-  Noticed while investigating `Conversation`'s constructor for the
-  `max_iteration_per_run` fix above: `stuck_detection=True` is already the
-  SDK's own default (repeated action/observation loops, monologues,
-  alternating patterns — thresholds in `StuckDetectionThresholds`), and a
-  detected stuck loop silently ends the run the same way `FINISHED` does —
-  today `runner.py` never even reads `execution_status`, so neither is
-  distinguishable from a normal successful finish in the harness's own
-  output. This is the same class of problem as the four `_AUTONOMOUS_SUFFIX`
-  -family symptoms (a run ends without the caller knowing it didn't really
-  complete), but at the SDK level rather than a prompt-following one — worth
-  a small, cheap addition (check the status after each `conversation.run()`,
-  emit a harness-authored notice on `STUCK`, same pattern as
-  `_verify_tests_and_retry`'s give-up notice) the next time this file is
-  touched for the same theme, not bundled into this change since it wasn't
-  what was asked for.
+- **JS/TS lint tools (ESLint, etc.) are not auto-detected from config** —
+  a Node project's own `scripts.lint`/`scripts.typecheck` *are* now run if
+  defined (added alongside the Go/Rust/Java generalization), but there's no
+  equivalent of Python's `_ruff_configured()`/`_mypy_configured()` that
+  infers lint/typecheck is relevant from an ESLint/tsconfig file when no
+  `package.json` script names it. Same "real scope question" as the
+  generalization item above, not a quick fix (ESLint config formats and
+  flat-config variants make "is lint configured" a harder question than the
+  ruff/mypy case).
+- **The OpenAI-compatible `/v1/chat/completions` adapter doesn't surface
+  `verification_state`.** The native REST/WS API (`GET /tasks/{id}`, `WS
+  /tasks/stream`) exposes it; the OpenAI-shaped endpoint's wire format has
+  no natural field for it and wasn't touched when this was added elsewhere
+  (see the matching decisions-log entry) — a caller using only that adapter
+  gets the agent's own final text with no independent verification signal.
 
 ## Known limitations (internal/architectural — see MANUAL.md for user-facing ones)
 
@@ -281,6 +334,151 @@ build plan. This file is the living, evolving companion to that static plan.
   (nested `package.json`, Python-markers-win, no-build-script fallback) —
   not yet re-verified against a fresh live run reproducing the original
   kitesurfing failure end to end.**
+- **A sixth variant, requested proactively rather than found live: the
+  harness's own verification loop couldn't tell "confirmed working" apart
+  from "found nothing to check," and had no visibility into a run that
+  never reached a coherent finish at all.** Two compounding gaps, both
+  addressed in the same change (see the matching decisions-log entry for
+  why a bigger rework was chosen over another incremental patch): (1) a
+  Node project whose primary check couldn't run at all (npm missing) was
+  previously lumped in with "no tests collected" and silently treated as
+  fine — not a failure, but also not something that should look
+  indistinguishable from an actual clean pass; (2) `runner.py` never read
+  `conversation.state.execution_status` at all, so a run the SDK's own
+  stuck-loop detection (`stuck_detection=True`, on by default) ended in
+  `STUCK` — or one that ended in `ERROR` — looked exactly like a normal
+  finish to every caller, the same "run ends without the caller knowing it
+  didn't really complete" problem as the `_AUTONOMOUS_SUFFIX` family above,
+  but at the SDK level rather than a prompt-following one. Fixed by
+  replacing the old binary "did tests fail" check with a five-state model
+  (`verified`/`failed`/`inconclusive`/`retry_exhausted`/`stuck` — see
+  MANUAL.md "Test verification") and checking `execution_status` for
+  `STUCK`/`ERROR` before verifying and after every retry. **Status:
+  applied; unit-tested (a fake `Conversation` whose `state.execution_status`
+  is set to the real SDK's `ConversationExecutionStatus.STUCK`/`ERROR`,
+  confirmed importable from `openhands.sdk` and confirmed via
+  `BaseConversation`'s `state`/`execution_status` properties that this
+  works identically for both `local` and `docker` execution) — not yet
+  re-verified against a real run that actually gets stuck.**
+- **A seventh variant, again requested proactively: every verification
+  concept in this harness — detection, "no false success," retry, the
+  state model — was implicitly Python/Node-only.** The prior generalization
+  (variant 5 above) fixed the concrete JSX-parse-error bug but left the
+  architecture itself two-language-shaped: `_detect_verification()`
+  returned a hardcoded `("pytest", ...) | ("npm_build", ...)` tuple, and
+  `CheckOutcome`'s `ran: bool` / `passed: bool | None` pair couldn't express
+  "this should be checkable but isn't" (a missing Go/Rust/Java toolchain)
+  as anything other than the same bucket as "not configured" or "no tests
+  yet" — exactly the kind of silent conflation variant 5 had just fixed for
+  Node, left unfixed for every other language. Rebuilt around four named
+  stages (project detection / plan discovery / command execution /
+  structured results — see "What's implemented" above and MANUAL.md
+  "Custom tools") and a `CheckOutcome.status` enum of five values
+  (`passed`/`failed`/`skipped`/`unavailable`/`timed_out`) instead of the
+  two-field boolean pair, specifically so "unavailable" (a real gap) and
+  "skipped" (a correct absence) can never be confused again, for any
+  language. Added `timed_out` as a genuinely new terminal state (not
+  present before this change at all) because a hung/looping check and a
+  wrong-answer check are different problems worth telling apart — see the
+  matching decisions-log entry for the full reasoning and what's honestly
+  verified vs. only detected per language (Java, concretely: detected
+  reliably, verified only if a Maven/Gradle toolchain happens to be
+  present — neither ships in this project's own dev/CI environment or the
+  Docker agent-server image today). **Status: applied; unit-tested per
+  stage plus real-subprocess end-to-end runs for every language whose
+  toolchain is installed in this dev environment (pytest, npm, ruff, go,
+  cargo, clippy) and the real "configured but no toolchain" path for mypy
+  and Maven (neither installed here, so these are real gaps being
+  exercised, not simulated ones) — not yet re-verified against a live task
+  that actually asks the agent to build a Go/Rust/Java project end to end.**
+- **An eighth variant, and the first one where the "wrong" thing the agent
+  did was defensible: a live Tower of Hanoi run had the agent repeatedly
+  re-edit already-correct code because the *test* it was chasing was wrong,
+  not the implementation — and its own diagnostic messages degraded into
+  fluent, grammatically normal, semantically empty prose across both
+  attempts.** User-reported, not synthetic. Traced the actual test by hand
+  against `HanoiGame(3)`'s real state: `test_invalid_move_larger_on_smaller`
+  asserts `move_disk('C', 'B')` should be invalid ("larger on smaller") at
+  a point in its own move sequence where C's top disk is actually 1 (the
+  smallest), not larger — moving it onto empty B is a legitimately valid
+  move. The implementation was correct the whole time; the test's own
+  comment was wrong about what it was testing. The agent's `<=`→`<` edit to
+  `move_disk`'s comparison was a genuine no-op for this failure (that
+  branch is never reached — `not self.rods[destination]` short-circuits it
+  when the destination is empty, which it was), and pytest's captured
+  output — including the exact `C: [2, 1]` state trace showing the top disk
+  was 1 — was available to the agent on every attempt but never used to
+  question the test. This is the same "trust the wrong premise instead of
+  tracing the real state" family as the `hanoi.py` `IndentationError` case
+  earlier in this file, but inverted: there the code was wrong and the
+  agent's self-report was wrong about why; here the code was *right* and
+  the test was wrong, and the harness's/skills' own "never weaken a test to
+  make it pass, fix the code instead" guidance actively pointed the agent
+  at the wrong side of the bug. Separately and more concerning: the agent's
+  own final messages on both retries were internally coherent English with
+  no concrete engagement with the actual failure at all ("Condition Energy
+  Evaluation," "retro-verifying conditionally determined returns from
+  contradictory game states violations circumspect inherently making sense
+  of failed revisions") — the SDK's own `stuck_detection` (on by default)
+  never flagged this (verified by reading `stuck_detector.py` directly: it
+  only detects *exact* repetition of actions/observations/messages, and
+  every retry here had a genuinely different edit and different text, so
+  none of its five patterns apply). Two separate fixes, see matching
+  decisions-log entries: (a) `skills/lifecycle/testing-and-verification.md`
+  and `debugging-and-failure-repair.md` now explicitly tell the agent to
+  prove a test is wrong against its own captured state trace before
+  re-editing working code a second time; (b) `runner.py` gained a
+  `no_progress` terminal state that stops the retry loop the moment a fix
+  attempt provably changes nothing observable in the verification output —
+  a mechanical, output-based check, deliberately not a judgment about
+  whether the agent's prose still makes sense. **Status: both applied;
+  (b) verified against the actual on-disk `projects/hanoi/` repro left by
+  this exact live run (running `_run_verification()` against it twice
+  confirms an identical failure signature, and running the full
+  `_verify_and_report()` loop against it with a fake conversation confirms
+  the loop now stops after 1 retry instead of 2) — (a) is prompt-level
+  guidance, not yet re-verified live since it can't be mechanically tested
+  the way (b) was.**
+- **A ninth variant, and the cleanest example yet of a gap that was never
+  the agent's fault: a fresh Tower of Hanoi generation had every unit test
+  pass — genuinely, no false self-report this time — while the actual
+  program crashed the moment a user picked the `SOLVE` menu option, and the
+  harness still reported `Verification: verified`.** User-reported, ran the
+  actual generated CLI by hand. Root cause, confirmed by reading the
+  generated `hanoi.py` directly: `solve()` (the function the `SOLVE` menu
+  branch calls) was defined *after* `if __name__ == "__main__": main()` —
+  when the file is `import`ed (exactly what `test_hanoi.py`'s `from hanoi
+  import HanoiGame, solve` does), Python runs the whole file top-to-bottom
+  before any test executes, `__name__ != "__main__"` so the guarded
+  `main()` call never fires, and `solve` is fully defined by the time any
+  test calls it — every test passes, honestly. Running `python hanoi.py`
+  directly calls `main()` immediately at that line, before the interpreter
+  ever reaches the later `def solve(...)` — `NameError`, the instant `SOLVE`
+  is chosen. This is qualitatively different from every prior "confident
+  agent" variant in this file: the agent's self-report was accurate (it
+  said tests passed, and they did), and the harness's own post-hoc pytest
+  re-run (already a safety net specifically for a *dishonest* self-report)
+  was equally fooled, because pytest genuinely could not see this bug — it
+  only ever imports the module, the one execution path the bug is invisible
+  from. No amount of "trust the agent less, re-run the tests yourself" (the
+  fix for every earlier variant) touches this, since the *test itself*
+  structurally cannot exercise the failing path. Fixed with two new,
+  independent Python-specific checks in `run_tests_tool.py`'s secondary-check
+  set (see "What's implemented" above and the matching decisions-log entry
+  for the full design reasoning): a static `entrypoint-ordering` check
+  (`ast`-based, catches this exact bug class by name, no subprocess) and a
+  `python <entry point>` smoke-run (stdin closed, catches startup crashes
+  more generally but — honestly documented as a real, deliberate limit, not
+  hidden — cannot reach an interactive branch like `SOLVE` itself, so it
+  did not and could not have caught this specific crash; `entrypoint-ordering`
+  is what did). **Status: applied; verified against the actual on-disk
+  `projects/hanoi/` repro left by this exact live run —
+  `run_full_verification()` against it reports `entrypoint-ordering` failed
+  with the precise diagnosis (names `solve` and `hanoi.py` directly) while
+  `pytest` genuinely passes, and overall `VerificationRun.state` is
+  `failed`, not `verified` — plus a synthetic-fixture regression test
+  reproducing the identical bug shape (a helper function defined after the
+  guard, called from inside it) and its fixed counterpart.**
 
 ## Decisions log (why, not just what)
 
@@ -498,6 +696,14 @@ build plan. This file is the living, evolving companion to that static plan.
   the full catalog via `load_skill_catalog('skills')` after adding these —
   all 12 skills (7 pre-existing + 5 new) parse without a
   `SkillValidationError`.
+  **Superseded:** a later request specified precise per-skill content and
+  trigger requirements for a broader 8-skill lifecycle set with names that
+  overlap these five — see the "Lifecycle skills" decisions-log entry below
+  for why the whole set was rewritten (authored, not downloaded) and moved
+  to `skills/lifecycle/` in legacy `triggers:` format rather than kept as
+  `SKILL.md`. This entry is left in place as the historical record of why
+  the original five were sourced the way they were; it no longer describes
+  what's on disk.
 - **`run_tests` generalization — chose "detect pytest vs. Node-build" over
   either a no-op or a full test-runner-detection rewrite.** Motivated by a
   live false pass: a Vite/React project with a real JSX parse error in
@@ -525,3 +731,415 @@ build plan. This file is the living, evolving companion to that static plan.
   new "none" default) to avoid changing behavior for every one of this
   repo's own pre-existing tests, which run pytest against a bare directory
   of test files with no `pyproject.toml` of their own.
+- **`_SDLC_SKILLS_SUFFIX` added, not a CLAUDE.md edit or task-text framing,
+  to get the five new SDLC skills actually used.** User asked how to make
+  the harness's generated-app agent use the five skills added above;
+  proposed two options themselves (a CLAUDE.md statement, or wrapping the
+  task in a bigger pre-defined context). Investigated the SDK directly
+  before answering either way (`context/prompts/sections/dynamic.py`,
+  `agent/base.py`, `tool/builtins/invoke_skill.py`) rather than guessing:
+  confirmed every `SKILL.md`-format skill (the five new ones plus the three
+  pre-existing `frontend-design`/`webapp-testing`/`web-artifacts-builder`)
+  is already listed, unconditionally, in an `<available_skills>` name +
+  description menu injected into every run's prompt, with an `invoke_skill`
+  tool auto-attached — discoverability was never the gap, and neither
+  proposed option would have moved it: **CLAUDE.md is never read by
+  `build_agent()`/`Agent(...)` at all** (it only governs this session,
+  developing the harness's own source — confirmed by grepping this repo's
+  own `src/` for any read of it, there is none), and the skill menu is
+  injected regardless of task phrasing, so richer task text wouldn't
+  increase discoverability either. The actual gap is reliability: the model
+  can see a skill in the menu and still not invoke it at the point it
+  applies. Fixed with a fifth `system_message_suffix` policy (same lever as
+  the four pre-existing ones in this file), naming each skill and the
+  lifecycle point it belongs at. Verified against the SDK source, not
+  assumed, that `invoke_skill(name="<skill-name>")` (the exact call syntax
+  used in the suffix's wording) is what the SDK's own prompt tells the
+  model to call. Unlike the other four `_SUFFIX` policies, this one is
+  proactive — added because the mechanism makes it possible, not because a
+  live run already demonstrated the agent ignoring these five skills; worth
+  a live re-check once a real task exercises it, same as the other
+  proactively-applied fixes in this file.
+  **Superseded:** `_SDLC_SKILLS_SUFFIX` was replaced by
+  `_LIFECYCLE_SKILLS_SUFFIX` — see the "Lifecycle skills" entry below. The
+  `invoke_skill(name="...")` mechanism this entry verified is still real
+  and still used by the three `anthropics/skills`-sourced `SKILL.md` skills
+  (`frontend-design`/`webapp-testing`/`web-artifacts-builder`), just no
+  longer by the lifecycle set.
+- **Verification loop rework: a five-state model + `CompletionContract` +
+  `TaskOutcome`/`TaskResult`, not another incremental patch to
+  `_verify_tests_and_retry`.** Explicit ask: a reliable, bounded SDLC loop
+  that "must not claim success merely because the agent called `finish`."
+  The prior shape (`_tests_are_failing(RunTestsObservation) -> bool` plus a
+  give-up-notice-on-exhaustion special case) could already distinguish
+  pass/fail/retry-exhausted for a *single* check, but had two structural
+  gaps a bigger rework was the right size for, not another special case
+  bolted on: (a) it had nowhere to put "inconclusive" as a state distinct
+  from "verified" — a Node project with npm missing and a Python project
+  with zero tests collected both just fell through to "didn't fail," which
+  is exactly the "no tests found being treated as proof of correctness"
+  failure mode the task explicitly called out to avoid; (b) it only ever
+  looked at one check, so adding lint/typecheck/npm-test (a separate,
+  explicit ask) meant either running them outside the state machine
+  entirely (defeating the point) or reworking the state machine to
+  aggregate multiple checks anyway. Chose:
+  - `CheckOutcome`/`VerificationRun` (`run_tests_tool.py`) as the
+    per-check/aggregate result shape, kept separate from the agent-facing
+    `RunTestsObservation` so the tool's existing single-check contract
+    (and its tests) stay untouched — `VerificationRun.state` is the
+    aggregation rule in one place: any real failure (primary or secondary)
+    forces `"failed"`; only the *primary* check passing promotes to
+    `"verified"`; everything else is `"inconclusive"`. A secondary check
+    (lint/typecheck) can never promote inconclusive to verified on its own
+    — tidiness isn't proof the software works.
+  - `TaskOutcome`/`CompletionContract` (`runner.py`) as the harness-level,
+    caller-facing verdict — deterministic and harness-computed, explicitly
+    *not* another LLM call or a bigger prompt (the task's own constraint:
+    "do not add a large always-on SDLC prompt"). The completion contract's
+    `acceptance_criteria`/`verification_checks`/`limitations` are derived
+    mechanically from what actually ran, not asked of the model.
+  - `TaskResult(list)` — `run_task`'s return value subclasses `list` rather
+    than becoming a new type, specifically so `messages[-1]`, `len(...)`,
+    `if messages:`, and iteration keep working for every existing caller
+    (`cli.py`, `server.py`'s OpenAI adapter, both test suites) with zero
+    changes, while `.outcome` carries the new structured verdict. Considered
+    changing `run_task`'s return type outright — rejected: every caller
+    would need updating in lockstep for no benefit `TaskResult` doesn't
+    already give for free.
+  - `"failed"` deliberately never appears as a final `verification_state` —
+    it's the transient signal inside the retry loop between "a check just
+    failed" and "was it fixed, or did retries run out." Keeping it as a
+    real, independently-tested state on `VerificationRun` (not just an
+    internal boolean) means the retry loop's own logic
+    (`while run.state == "failed":`) reads as what it is.
+  - CLI/server surfacing (`cli.py`'s `Verification: <state>` line +
+    nonzero exit on `retry_exhausted`/`stuck`; `server.py`'s
+    `verification_state`/`completion_contract` on `_TaskRecord` and the
+    WS `"result"` event) was treated as in-scope, not a follow-up: the
+    task's own point 10 ("make terminal outcomes explicit to callers ...
+    A task with unresolved verification failures must be visibly
+    unsuccessful or incomplete") is unmet if the richer outcome only exists
+    inside `runner.py` and no caller ever sees it. The OpenAI-compatible
+    `/v1/chat/completions` adapter was deliberately left alone (see
+    backlog) — its wire format has no natural field for this and the task
+    didn't ask for a wire-format extension.
+  - Lint/typecheck/npm-test are opt-in by project configuration, never
+    invented: `ruff`/`mypy` only run if the project's own `pyproject.toml`/
+    config files declare them, `npm test` only runs against a real,
+    non-placeholder `scripts.test`. A configured tool that isn't installed
+    is a `limitations` entry, not a failure — an environment gap (missing
+    `mypy`) isn't the same claim as a code defect, and treating it as a
+    hard failure would block completion on something the agent usually
+    can't fix (it doesn't control what's preinstalled in `docker`
+    execution's image).
+  Verified against the SDK directly before relying on it, not assumed:
+  `conversation.state.execution_status` and the `ConversationExecutionStatus`
+  enum (`IDLE`/`RUNNING`/`PAUSED`/`WAITING_FOR_CONFIRMATION`/`FINISHED`/
+  `ERROR`/`STUCK`/`DELETING`) by reading `openhands/sdk/conversation/state.py`
+  and `base.py` directly, confirming `state`/`execution_status` are declared
+  on `BaseConversation` itself (so this works identically for `Conversation`'s
+  `LocalConversation` and `RemoteConversation` — i.e. both `local` and
+  `docker` execution) and that `ConversationExecutionStatus` is re-exported
+  from `openhands.sdk` top-level.
+- **Language-neutral verification: four named stages + a `CheckOutcome`
+  status enum, not another per-language if/else branch bolted onto
+  `run_full_verification()`.** Explicit ask: extend the verification loop
+  to Go, Rust, and Java (Maven+Gradle) alongside Python/Node, "where
+  project metadata makes the commands unambiguous," with unknown projects
+  producing an explicit "unavailable" result rather than a guess. Before
+  writing any language-specific code, read the existing
+  `_detect_verification()` and confirmed it hardcoded exactly two outcomes
+  (`"pytest"` or `"npm_build"`, both tupled with a `run_dir`) — adding a
+  third would mean a third hardcoded tuple shape, a fourth a fourth, and so
+  on; not a "generalization," a linear pile of special cases. Chose to name
+  and separate the four stages the task asked for explicitly (detection /
+  plan discovery / execution / structured results) as real functions with
+  real unit tests per stage, rather than one longer function, because the
+  three failure classes this needs to distinguish — "we don't know what
+  this project is," "we know, but the tool to check it isn't installed,"
+  "we tried and it failed" — map onto exactly stages 1/2/3 and are much
+  easier to get right (and to test in isolation) when each is a separate
+  function than when they're interleaved inside one big conditional.
+  - **`CheckOutcome.status` (five-value string) replaces the previous
+    `ran: bool` + `passed: bool | None` pair.** The old pair could not
+    express "this should be checkable but isn't" (a missing Go/Rust/Java
+    toolchain) as distinct from "not configured here" (no ruff config) or
+    "ran, nothing to check" (pytest, zero tests) — all three collapsed to
+    `ran=False, passed=None`. Once every language's *primary* check can
+    plausibly be blocked by a missing toolchain (Go/Rust: `go`/`cargo` not
+    on `PATH`; Java: `mvn`/`gradle` not on `PATH`; unknown project: no
+    command at all), conflating "real gap" with "correct absence" stops
+    being a rare edge case and becomes the common case for three of six
+    languages — worth a real enum, not another special-cased boolean
+    combination.
+  - **`timed_out` added as a genuinely new terminal state**, both on
+    `CheckOutcome` and (via `VerificationRun.state`, propagated by
+    `runner.py`) as a `TaskOutcome.verification_state` value. Considered
+    folding a timeout into the existing "unavailable" bucket (the check
+    also "couldn't be completed") — rejected: a timeout usually means the
+    *agent's own code* is hanging (an infinite loop, an unbounded wait),
+    which is fixable by the agent the same way a real failure is, unlike a
+    missing system toolchain, which isn't. So a timeout is retried the same
+    as a failure (`_RETRIABLE_STATES = ("failed", "timed_out")` in
+    `runner.py`), with real partial output captured from
+    `subprocess.TimeoutExpired.stdout/stderr` and sent back — but if it's
+    *still* timing out after the retry budget, the terminal state stays
+    `timed_out` rather than becoming `retry_exhausted`, so a caller can
+    tell "the fix attempts produced a real error we gave up on" apart from
+    "this kept hanging the whole time," which usually point at different
+    remediations (fix the bug vs. investigate the environment/timeout
+    value).
+  - **Per-language scoping followed the task's own qualifier — "where
+    project metadata makes the commands unambiguous."** Go (`go test
+    ./...`, `go vet ./...`) and Rust (`cargo test`, `cargo check`, `cargo
+    clippy`) are unconditional once their manifest is found: these are
+    *the* standard commands for those ecosystems, no per-project
+    configuration needed, unlike Python lint/typecheck (many possible
+    tools) or Node scripts (arbitrary names). Java got the same "test
+    command, prefer the wrapper" treatment (`./mvnw test` / `./gradlew
+    test`, falling back to a global `mvn`/`gradle`) but deliberately no
+    secondary checks (no direct request for a Java lint/typecheck
+    equivalent, and Maven/Gradle don't have one standard tool the way
+    ruff/mypy or clippy do).
+  - **Java is honestly detection-only in this project's own environment,
+    documented as such rather than glossed over.** Neither `mvn` nor
+    `gradle` (nor their wrappers) are installed in this dev environment or
+    the Docker agent-server base image — confirmed live (`which mvn` /
+    `which gradle` both fail here). Detection and plan discovery are fully
+    real and tested (marker files, wrapper-vs-global resolution); the
+    "verified" path was proven with a fake wrapper script that exits 0
+    rather than a real Maven build, and the "unavailable" path was proven
+    against this environment's *actual* absence of Maven, not a simulated
+    one. MANUAL.md's "Known limitations" states this distinction plainly
+    (detected vs. verified) rather than letting "Java support" imply more
+    than it delivers today.
+  - **The agent-facing `run_tests` tool reuses stages 1–3 for Go/Rust/Java
+    instead of gaining its own second detection path.** Its Python/Node
+    behavior (pytest's rich pass/fail-count parsing and `path` targeting;
+    `npm run build`'s exit-status shape) stays byte-for-byte the same
+    contract it always had — those code paths and their tests were left
+    untouched. For every other language it now runs the plan's primary
+    `CheckSpec` via the same `execute_check()` the harness's own loop uses,
+    avoiding a second, divergent implementation of "what command applies
+    here" that could drift from the harness-side answer.
+  - **Node gained `lint`/`typecheck` secondary checks** (reading
+    `scripts.lint` / `scripts.typecheck` / `scripts["type-check"]`) as part
+    of this same change, per the task's explicit "configured test, build,
+    lint, and typecheck scripts" — previously only `build`/`test` were
+    read. ESLint/tsconfig-based *inference* (deciding lint applies even
+    with no named script) was not added — see the matching backlog entry —
+    since unlike Python's `[tool.ruff]`, there's no one canonical config
+    location to check.
+- **Lifecycle skills: legacy `triggers:`/`paths:` format under
+  `skills/lifecycle/`, authored fresh, replacing the earlier five-skill
+  `SKILL.md`/`invoke_skill` set — not another round of downloading.**
+  Explicit ask: eight named skills (repository-discovery,
+  requirements-analysis, implementation-planning, testing-and-verification,
+  debugging-and-failure-repair, security-review,
+  documentation-and-operational-readiness, completion-and-release-readiness)
+  with precise per-skill trigger conditions and content requirements
+  ("Keep each skill short and actionable," "Use precise triggers and/or
+  path triggers," "Do not create one huge always-active SDLC prompt"), four
+  of which share a name with a skill already on disk from the earlier
+  `addyosmani/agent-skills` download.
+  - **Format: legacy `triggers:`/`paths:`, not `SKILL.md`.** Read
+    `openhands/sdk/skills/skill.py` directly (not assumed) before choosing:
+    confirmed only the legacy format supports a real `KeywordTrigger`/
+    `PathTrigger` at all — `SKILL.md` has no trigger frontmatter, full stop,
+    it's always menu-listed with `invoke_skill` as the only access path
+    (`_load_agentskills_skill` never reads `triggers:`/`paths:`). This
+    directly satisfies "precise triggers and/or path triggers" as a literal
+    requirement, not just a style preference, and gives real, testable,
+    code-enforced firing instead of depending on the model choosing to
+    call `invoke_skill` — the same reliability gap the now-superseded
+    `_SDLC_SKILLS_SUFFIX` existed to paper over. A second, non-obvious
+    finding from the same source read: a legacy skill *with* a trigger is
+    **also** listed in `<available_skills>` (confirmed via the `Skill`
+    docstring: "With triggers: Listed in `<available_skills>`, content
+    injected on trigger") — so switching format cost nothing on the "make
+    skill names/descriptions menu-discoverable" requirement, it only
+    added real triggering on top.
+  - **Content authored fresh, not downloaded, despite the standing
+    "download real content, don't invent it" instruction from the earlier
+    skill-sourcing task.** That instruction applies to *generic reusable
+    engineering expertise* (TDD, OWASP threat modeling) that legitimately
+    exists as someone else's published work. This task's skills are not
+    that: several sentences are direct statements about *this harness's own
+    architecture* — "do not rely on CLAUDE.md... use the shared skill
+    catalog and the existing AGENTS.md mechanism," references to this
+    project's own `repository-discovery`/`debugging-and-failure-repair`
+    sibling skills by name, "distinguish 'no tests found' from 'verified'"
+    (this harness's own `run_tests_tool`/`TaskOutcome` vocabulary). No
+    external, generically-sourced skill could state these facts correctly;
+    writing them is describing this repository's own conventions, the same
+    category `commit-conventions.md`/`fastapi-conventions.md` already fall
+    into (both clearly authored for this project, never presented as
+    downloaded). Separately, brevity was itself a stated requirement ("short
+    and actionable") the previous downloaded set (250-530 lines each)
+    structurally couldn't satisfy — that format is designed for
+    progressive-disclosure reference material, not a short lifecycle nudge.
+  - **`requirements-analysis`, `implementation-planning`,
+    `testing-and-verification`, `security-review` keep their names; content
+    fully replaced.** `release-readiness` renamed to
+    `completion-and-release-readiness` (matching the task's requested name;
+    keeping the old name alongside the new one would have meant two skills
+    covering the same pre-finish lifecycle point). The old `SKILL.md`
+    directories were deleted rather than left alongside the new files —
+    confirmed live this was necessary, not cosmetic: with both present,
+    `load_skill_catalog()`'s `{**repo_skills, **knowledge_skills,
+    **agent_skills}` dict merge silently dropped the new legacy-format
+    skill for every colliding name (the `SKILL.md`/`agentskills` entry
+    always overwrote it, since that dict is merged last), so the new,
+    intended content would have been invisible in the actual catalog.
+    Deletion is safe and reversible: the old five were already committed
+    (see "sdlc" commit) before this change, so git history keeps them
+    recoverable even though they're gone from the working tree.
+  - **`repository-discovery` and `documentation-and-operational-readiness`
+    are genuinely new** — no prior skill covered "establish the actual
+    stack/conventions before editing" or "keep docs/config-reference/API
+    examples in sync," so these fill real, previously-unfilled lifecycle
+    gaps rather than replacing something.
+  - **`agent.py`'s suffix rewritten as `_LIFECYCLE_SKILLS_SUFFIX`, per the
+    task's own four required bullets** (inspect before editing; proactively
+    apply lifecycle skills; skip for trivial changes; skill guidance is
+    never a substitute for verification) — shorter than the old
+    `_SDLC_SKILLS_SUFFIX` since it no longer needs to name eight skills
+    individually or instruct an `invoke_skill` call that these skills don't
+    use; it instead tells the agent to keep applying a lifecycle skill's
+    *discipline* even when a task's exact wording doesn't happen to contain
+    a trigger word, since `KeywordTrigger` matching is a proxy for
+    relevance, not relevance itself.
+  - **Known limitation, stated plainly rather than glossed over:**
+    `KeywordTrigger` matching is inherently approximate. A task that
+    legitimately needs `security-review` but is phrased without any of its
+    ~14 trigger words won't get it injected automatically (mitigated, not
+    solved, by `_LIFECYCLE_SKILLS_SUFFIX`'s "apply the discipline even
+    off-trigger" instruction — itself only a prompt-level nudge, not a
+    mechanical guarantee). Conversely a broad word like `api` (shared by
+    `security-review` and `documentation-and-operational-readiness`) will
+    fire on tasks where it's only incidentally relevant. This is the same
+    class of tradeoff `KeywordTrigger` already had for the four
+    pre-existing legacy skills, not a new risk introduced here — verified
+    live (not assumed) via `Skill.match_trigger()` against representative
+    trigger/non-trigger task text for every one of the eight skills, plus
+    an explicit test that unrelated text (a Q&A question, a creative-writing
+    task) does not fire any lifecycle skill.
+- **`no_progress` detection: compare structured verification output across
+  retries, not the agent's own message text.** User reported a live run
+  where the agent's diagnostic prose degraded into fluent-sounding nonsense
+  across two retries while re-editing already-correct code (see the
+  matching Known-limitations entry). Investigated a text-coherence
+  heuristic first (asked the user directly, offering three designs) since
+  it most directly targets what was observed — rejected in favor of
+  comparing verification output instead, for reasons that held up under
+  scrutiny, not just cost:
+  - **No reliable, cheap way to score "does this text still make sense"
+    exists in this harness.** A heuristic classifier (word-rarity, sentence
+    length, grammar checks) risks false-positiving on legitimately verbose
+    technical reasoning and false-negatives on more short/careful
+    degenerate text, and validating it would need a corpus of
+    real degenerate vs. real coherent agent output this harness doesn't
+    have. An LLM-based judge adds a second model call (cost, latency, and
+    its own failure modes — an LLM judging LLM output is not obviously more
+    reliable) and works against the model-agnostic invariant less directly
+    (a judge call still has to pick *some* model).
+  - **The actual harm is measurable without reading a word of prose.** A
+    "no observable change" fix attempt already contains a precise, cheap,
+    structured signal: the *verification output itself* — same check, same
+    exit code, same content (once timing noise is stripped) — is identical
+    before and after a full retry cycle. This doesn't require judging
+    whether the agent's reasoning was coherent, only whether its reasoning
+    (however it read) produced any measurable effect. It also generalizes:
+    it would equally catch a *perfectly coherent* agent stuck re-trying the
+    same ineffective fix for a mundane reason, which a text-coherence check
+    would miss entirely since coherent-but-wrong text passes any prose
+    check.
+  - **Comparison signature strips only wall-clock timing, nothing else.**
+    Considered stripping all digits (simpler regex) — rejected: that would
+    also hide a genuinely different line number or a genuinely different
+    assertion value between two attempts, which is exactly the kind of
+    real change this check must not mask. The narrower
+    `\d+(?:\.\d+)?\s*(?:s|ms|seconds?|milliseconds?)` pattern targets only
+    known duration-footer noise (confirmed live: pytest's own summary line
+    differed only in its trailing `in 3.85s` vs. `in 3.83s` between the two
+    real failing runs, otherwise byte-identical).
+  - **Fires after exactly one no-progress retry, not two.** Given
+    `HARNESS_MAX_VERIFY_RETRIES` defaults to `2`, requiring two consecutive
+    no-progress retries before stopping would only ever save budget on a
+    third-or-later attempt that doesn't exist by default — the whole point
+    (stop wasting cost on an attempt already proven not to help) would be
+    nearly vacuous at the default setting. A single unchanged retry is
+    already conclusive: the fix attempt in question demonstrably altered
+    nothing about the observed failure.
+  - **A new terminal state (`no_progress`), not folded into
+    `retry_exhausted`.** Distinct causes deserve a distinct label: exhausted
+    retries with the failure *changing* each time means the agent tried
+    different things and none worked yet (arguably still salvageable with a
+    human's help pointing at the right angle); `no_progress` means a whole
+    attempt provably produced zero effect, a stronger and more specific
+    signal worth surfacing separately (see MANUAL.md's state table).
+- **Entry-point checks: a static `ast` check plus a real smoke-run, not one
+  or the other, and not an attempt to simulate interactive use.** User
+  chose "both" after being shown the tradeoff directly. Considered three
+  designs before landing here:
+  - **Static-only.** Precisely targets the actual reported bug (order of
+    definitions relative to the `__main__` guard) with zero execution risk
+    — but only that bug class. A different startup crash (e.g. a bad
+    top-level `import`, or an exception raised unconditionally inside
+    `main()`) would sail through undetected.
+  - **Smoke-run-only.** More general — genuinely executes the script — but
+    cannot see the *reason* a crash happened, only that one did, and
+    critically **cannot reach the actual reported bug at all**: with stdin
+    closed, the process crashes with `EOFError` at the very first `input()`
+    prompt, long before a user could ever type `SOLVE`. Confirmed by
+    running it live against the real broken file. Smoke-run-only would have
+    reported *a* failure, but for the wrong reason, and would not
+    generalize to a version of the bug reachable later in a longer
+    interaction.
+  - **Attempting to drive the interactive session** (feed a plausible
+    command sequence via stdin, e.g. guess `"3\nSOLVE\n"` for this
+    project) — rejected outright, not just deprioritized: there is no
+    general, safe way to guess what an arbitrary generated program expects
+    to read, for what commands, in what order. A wrong guess either
+    produces a misleading failure (blaming the program for not
+    understanding an input this harness invented) or gives false
+    confidence (a guess that happens not to exercise the buggy branch).
+    Doing this reliably would require either the agent's own declared
+    interaction script (not requested, real scope) or genuine automation
+    of the interactive session, neither of which this pass attempted -
+    documented plainly in MANUAL.md's "Known limitations" as a real,
+    permanent gap rather than something papered over.
+  Landed on **both static and smoke-run, each contributing independently**:
+  together they cover "this bug shape, precisely" and "does it even start,
+  generally" — two different, complementary slices of "does the entry point
+  actually work," while being explicit in the docs about the interactive-path
+  gap neither closes.
+  - **`CheckSpec.precomputed` added as a minimal, general extension**
+    rather than a special case bolted onto `execute_check` for this one
+    check. A static check is categorically different from every other check
+    in this module (no subprocess, result known at planning time) — giving
+    it a real field in the existing planning/execution boundary (`execute_check`
+    returns `spec.precomputed` unchanged when set) keeps stage 3
+    ("command execution") honestly describable as "the only stage that
+    spawns a subprocess — except when a spec says it doesn't need to,"
+    rather than teaching `execute_check` a one-off bypass just for this
+    check. Reusable by any future static check without another special case.
+  - **`stdin=subprocess.DEVNULL` made the default for every check via
+    `execute_check`, not a flag only the entry-point smoke-run opts into.**
+    Every existing check (pytest, ruff, mypy, npm, go, cargo, mvn/gradle)
+    already shouldn't need to read stdin in a properly automated
+    invocation; before this change none of them explicitly closed it,
+    meaning any of them could in principle inherit the harness's own real
+    stdin and hang a check indefinitely instead of failing fast — a latent
+    risk this change closes globally, not just for the one check that
+    actually needed it. Consistent with the same "no human is available to
+    answer a prompt" principle `agent.py`'s `_NONINTERACTIVE_TOOLING_SUFFIX`
+    already applies to the agent's own tool calls.
+  - **Entry points are looked for only at the Python project's root
+    directory, not recursively.** Matches the kind of small, single-script
+    generated project this harness actually verifies (confirmed by every
+    live repro in this file so far); a deeper search would risk picking up
+    an unrelated `__main__` guard in, say, a vendored dependency or an
+    example script, and adds real cost (another tree walk) for a case not
+    yet observed in practice. Documented as a real scope limit, revisitable
+    if a nested-entry-point project is ever actually seen.

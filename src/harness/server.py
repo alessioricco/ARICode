@@ -14,7 +14,7 @@ import queue
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 from .config import Config, ConfigError, load_config, override_llm
@@ -117,6 +117,14 @@ class _TaskRecord:
     messages: list[dict] = field(default_factory=list)
     error: str | None = None
     updated_at: float = field(default_factory=time.time)
+    # `status == "completed"` only ever meant "the run ended without raising
+    # an exception" — it said nothing about whether verification actually
+    # passed. `verification_state`/`completion_contract` carry that (see
+    # runner.py's TaskOutcome) so a poller doesn't mistake a
+    # retry-exhausted or stuck run for a confirmed success just because
+    # `status` says "completed".
+    verification_state: str | None = None
+    completion_contract: dict[str, Any] | None = None
 
 
 def create_app():
@@ -176,9 +184,11 @@ def create_app():
                 record.updated_at = time.time()
 
         try:
-            stream_task(record.task, cfg=cfg, on_message=on_message)
+            outcome = stream_task(record.task, cfg=cfg, on_message=on_message)
             with tasks_lock:
                 record.status = "completed"
+                record.verification_state = outcome.verification_state
+                record.completion_contract = asdict(outcome.completion_contract)
         except Exception as exc:  # noqa: BLE001 - surfaced via GET /tasks/{id}, not raised here
             with tasks_lock:
                 record.status = "failed"
@@ -225,8 +235,15 @@ def create_app():
                 "task_id": record.id,
                 "status": record.status,
                 "final_message": (
-                    _final_text_from_dumps(record.messages) if record.status == "completed" else None
+                    _final_text_from_dumps(record.messages)
+                    if record.status == "completed"
+                    else None
                 ),
+                # See MANUAL.md "Test verification": `status == "completed"`
+                # only means the run didn't raise — check `verification_state`
+                # for whether it was actually confirmed working.
+                "verification_state": record.verification_state,
+                "completion_contract": record.completion_contract,
                 "messages": list(record.messages),
                 "error": record.error,
             }
@@ -257,7 +274,14 @@ def create_app():
 
         def run() -> None:
             try:
-                stream_task(request.task, cfg=cfg, on_message=on_message)
+                outcome = stream_task(request.task, cfg=cfg, on_message=on_message)
+                events.put(
+                    {
+                        "type": "result",
+                        "verification_state": outcome.verification_state,
+                        "completion_contract": asdict(outcome.completion_contract),
+                    }
+                )
             except Exception as exc:  # noqa: BLE001 - surfaced to the client, not raised
                 events.put({"type": "error", "detail": str(exc)})
             finally:

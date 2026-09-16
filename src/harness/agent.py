@@ -111,6 +111,38 @@ _VERIFY_BEFORE_FINISH_SUFFIX = (
     "re-verify, don't report the failure as something left for later."
 )
 
+# The eight lifecycle skills in skills/lifecycle/ (repository-discovery,
+# requirements-analysis, implementation-planning, testing-and-verification,
+# debugging-and-failure-repair, security-review,
+# documentation-and-operational-readiness, completion-and-release-readiness
+# — see MANUAL.md "Skills") are legacy-format `.md` files with `triggers:`
+# frontmatter (KeywordTrigger), not AgentSkills `SKILL.md` — a deliberate
+# switch from this harness's earlier 5-skill set (see ROADMAP.md's decisions
+# log): a KeywordTrigger skill auto-injects its full content the moment a
+# matching word appears in the task, with no model action required, instead
+# of depending on the model choosing to call `invoke_skill` — real,
+# code-enforced triggering rather than a hope. That makes most of what the
+# old suffix said here (name each skill, tell the model to invoke it by
+# name) no longer necessary; what's still worth saying explicitly is the
+# surrounding discipline a deterministic trigger can't provide on its own —
+# confirmed by reading the SDK source (`skill.py`), not assumed.
+_LIFECYCLE_SKILLS_SUFFIX = (
+    "Before editing, inspect the repository itself (see the "
+    "`repository-discovery` skill if it's already in context) and apply "
+    "whatever lifecycle skill guidance becomes relevant as the task "
+    "unfolds — most of these activate automatically based on your task, "
+    "but act on the lifecycle discipline they describe even for a task "
+    "whose wording doesn't happen to match a trigger word, if the "
+    "situation still calls for it (e.g. a vague request still needs "
+    "requirements pinned down even if it never says 'requirement'). Skip a "
+    "skill outright when the task is too small for it to matter — a "
+    "one-line fix doesn't need requirements analysis or a release-readiness "
+    "review. A skill's guidance is advice for how to do the work, never a "
+    "substitute for actually doing it — reading `testing-and-verification`'s "
+    "or `security-review`'s guidance does not itself verify or secure "
+    "anything; you still have to run the checks and read their real output."
+)
+
 
 def build_agent(cfg: Config) -> Agent:
     agent_context = AgentContext(
@@ -122,7 +154,8 @@ def build_agent(cfg: Config) -> Agent:
         load_project_skills=True,
         system_message_suffix=(
             f"{_AUTONOMOUS_SUFFIX}\n\n{_README_SUFFIX}\n\n"
-            f"{_NONINTERACTIVE_TOOLING_SUFFIX}\n\n{_VERIFY_BEFORE_FINISH_SUFFIX}"
+            f"{_NONINTERACTIVE_TOOLING_SUFFIX}\n\n{_VERIFY_BEFORE_FINISH_SUFFIX}\n\n"
+            f"{_LIFECYCLE_SKILLS_SUFFIX}"
         ),
     )
     agent = Agent(llm=build_llm(cfg), tools=build_tools(), agent_context=agent_context)
