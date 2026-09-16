@@ -8,8 +8,8 @@ scoped or built, move its record there per `CLAUDE.md`'s maintenance rule.
 
 Classification: **must** (blocks a stated spec acceptance criterion or
 carries real correctness/safety risk) | **nice to have** (clear value, no
-urgency) | **not urgent** (real but low-impact, or blocked on something
-outside our control).
+urgency) | **later** (real but low-impact, or blocked on something outside
+our control).
 
 ---
 
@@ -67,18 +67,80 @@ Minimal remediation: a shared-secret header check (e.g.
 no SDK verification needed) gating all task-submission routes, plus a loud
 `MANUAL.md` warning against `--host 0.0.0.0` without one.
 
+### 6. Project path containment and symlink protection
+Project resolution currently joins the caller-provided `project` value to
+`HARNESS_PROJECTS_DIR` via a bare `os.path.join()` in both `cli.py`'s
+`--project` handling and `server.py`'s `project` request field, with no
+check that the resolved path stays inside `HARNESS_PROJECTS_DIR`. Because
+`os.path.join(a, b)` silently discards `a` when `b` is absolute, an
+absolute project value (e.g. `--project /etc/cron.d`, or the same value in
+an unauthenticated `POST /tasks` request) redirects the agent's entire
+workspace — including its terminal and file-editor tools — to an arbitrary
+path on the host; `..` traversal and symlinked project folders open the
+same hole more subtly. This compounds directly with item #5 (server mode
+has no authentication): over the network, this isn't just a local
+misconfiguration risk, it's a remote path-escape primitive. Add one shared
+resolver used by both call sites: reject absolute/traversal project names
+outright, resolve both paths, require
+`project_dir.is_relative_to(projects_root)`, and reject symlink escapes
+before creating or using the directory. Add tests for traversal, absolute
+paths, and symlinks.
+
+### 7. Reconsider treating `inconclusive` as a nonzero (unsuccessful) exit by default
+`cli.py` deliberately returns exit code `0` for `inconclusive` today — the
+code comment says so explicitly ("isn't an error — nothing was proven
+broken") — so this isn't a bug to fix so much as a design default worth
+reconsidering: a CI pipeline or calling script that only checks the exit
+code still can't distinguish "verified" from "nothing could be checked,"
+which is exactly the ambiguity `verification_state` was built to make
+visible in the first place. Consider making `inconclusive` nonzero by
+default (or adding an explicit `--allow-unverified` opt-in for callers that
+want today's behavior back), while keeping the state itself — and the
+`limitations` explaining why — visible in `TaskOutcome` and server
+responses either way. Add CLI and API tests for unknown projects, missing
+tools, and projects with no tests to lock in whichever default is chosen.
+
+### 8. Add a global task execution budget
+`HARNESS_MAX_ITERATIONS` bounds each individual `conversation.run()` call,
+but `runner.py` calls it up to three separate times per task — the initial
+run, then up to `HARNESS_MAX_VERIFY_RETRIES` more for
+`_enforce_task_tracker_completion`'s retries, then up to
+`HARNESS_MAX_VERIFY_RETRIES` more again for `_verify_and_report`'s retries
+— and each call gets a fresh `max_iteration_per_run` budget from the SDK,
+not a shared one. Worst case, a single task can spend roughly
+`HARNESS_MAX_ITERATIONS × (1 + 2 × HARNESS_MAX_VERIFY_RETRIES)` iterations,
+well beyond what the configured cap suggests — not previously documented
+anywhere in `ROADMAP.md`. Track a shared iteration, wall-clock, or
+equivalent task-level budget across all three phases and stop with an
+explicit terminal state when it's exhausted; keep the existing per-run SDK
+limit as a secondary guard, and test the accounting across retries.
+
+### 9. Add machine-checkable acceptance criteria
+`CompletionContract.acceptance_criteria` (`runner.py`) is just descriptive
+strings today ("The task described in the original request is
+implemented.") — never independently evaluated against anything, so it
+records what should be true without ever checking it. Add an optional
+structured acceptance-check field to CLI/API task requests, with safe,
+language-neutral checks such as expected files, commands, or exit statuses.
+Evaluate these checks alongside tests and builds, include their results in
+`TaskOutcome`, and make a failed required criterion block a `verified`
+result. Keep this opt-in until the contract and security model are
+settled (an arbitrary caller-supplied "command" check is itself a command-
+injection-shaped surface worth scoping carefully — see item #6's path-
+containment issue for the same class of risk).
+
 ---
 
 ## nice to have
 
-### 6. Milestone 3 — live provider-swap proof
+### 10. Milestone 3 — live provider-swap proof
 Currently blocked, not missing by design: needs a second LLM provider key
 or a local model endpoint to actually exercise. Proves the model-agnostic
 invariant (the project's core selling point) end-to-end rather than by
 code inspection alone. Low effort once a key/endpoint is available — mark
 as ready-to-do rather than actively schedule.
 
-### 7. JS/TS lint config inference (ESLint, tsconfig)
+### 11. JS/TS lint config inference (ESLint, tsconfig)
 Node projects only get lint/typecheck verification today if `package.json`
 explicitly names a `scripts.lint`/`scripts.typecheck` entry — there's no
 equivalent of Python's `_ruff_configured()` that infers "lint is relevant
@@ -88,7 +150,7 @@ correctness risk on its own (worst case: a check is skipped, not falsely
 passed) — flat-config variants make "is lint configured" a genuinely
 harder question than the Python case, so it's real scoped work, not quick.
 
-### 8. Wider JS test-runner detection (jest/vitest/mocha)
+### 12. Wider JS test-runner detection (jest/vitest/mocha)
 `npm run build`/`scripts.test` are run as opaque commands today; the
 actual test runner and its pass/fail parsing (the rich detail pytest
 verification already gets) isn't detected. Would bring Node verification
@@ -97,7 +159,7 @@ item in `ROADMAP.md` since Milestone 4 — worth doing, not urgent, since the
 build-script check already catches the concrete failure class that
 motivated Node verification in the first place (parse errors).
 
-### 9. Surface `verification_state` on the OpenAI-compatible `/v1/chat/completions` adapter
+### 13. Surface `verification_state` on the OpenAI-compatible `/v1/chat/completions` adapter
 The native REST/WS API (`GET /tasks/{id}`, `WS /tasks/stream`) already
 exposes the seven-state verification verdict; the OpenAI-shaped adapter
 doesn't, since its wire format has no natural field for it. A caller using
@@ -108,7 +170,7 @@ were built to close everywhere else, just not reachable from this one
 entry point. Needs a deliberate wire-format extension decision (e.g. a
 custom field or a trailing system message), not a quick patch.
 
-### 10. Server-mode task-registry TTL purge
+### 14. Server-mode task-registry TTL purge
 `server.py`'s task registry is in-memory, per-process, and unbounded —
 fine for a dev/demo server, a real liability for anything long-running
 (memory grows forever; task IDs live forever). A TTL-based purge is a
@@ -116,14 +178,14 @@ small, self-contained improvement; a persistent store (Redis/DB) is a
 bigger step and only worth it if multi-worker/restart-survives use is
 actually needed.
 
-### 11. ECS/EC2 (or other remote) execution backend
+### 15. ECS/EC2 (or other remote) execution backend
 `workspace.py`'s `build_workspace()` is already a single dispatch point —
 adding a backend is one new branch plus a new `HARNESS_EXECUTION` value,
 not a rewrite. Useful if tasks need to run somewhere other than
 local/Docker (e.g. ephemeral cloud runners for parallel tasks), but
 nothing today demonstrates a concrete need for it.
 
-### 12. Dedicated live test for the entrypoint-ordering / smoke-run checks
+### 16. Dedicated live test for the entrypoint-ordering / smoke-run checks
 `entrypoint-ordering` and the Python smoke-run are unit-tested against a
 synthetic fixture and verified against one real historical repro
 (`projects/hanoi/`), but not yet re-verified against a *fresh* live agent
@@ -131,7 +193,7 @@ run end-to-end. Cheap to do, closes the "not yet re-verified live" caveat
 that recurs across nearly every fix logged in `ROADMAP.md`'s Known
 Limitations section.
 
-### 13. Per-task cost ceiling (`HARNESS_MAX_COST_USD`)
+### 17. Per-task cost ceiling (`HARNESS_MAX_COST_USD`)
 `HARNESS_MAX_ITERATIONS` bounds how many *iterations* a run can take, but
 not how many *dollars* it can spend — a single expensive iteration (a huge
 context, a costly reasoning-effort setting) isn't capped by an iteration
@@ -144,17 +206,17 @@ re-check `execution_status` — would let a runaway-cost run stop cleanly
 with a new terminal state instead of relying solely on the iteration cap
 as a cost proxy.
 
-### 14. Add CI (GitHub Actions) running tests and lint on push/PR
+### 18. Add CI (GitHub Actions) running tests and lint on push/PR
 The repo is hosted on GitHub (`origin` points to
 `github.com/alessioricco/coding-agent-harness`) but has no
 `.github/workflows` at all — the 249-test suite and `ruff check`/
 `format --check` only run when a human or agent remembers to run them
-locally, per `CLAUDE.md`'s own working-style rule. A
-minimal workflow (`uv pip install -e ".[dev]"` + `uv run pytest -q` +
-`uv run ruff check .` on push/PR) would catch a regression before it lands
-rather than relying on manual discipline every session.
+locally, per `CLAUDE.md`'s own working-style rule. A minimal workflow
+(`uv pip install -e ".[dev]"` + `uv run pytest -q` + `uv run ruff check .`
+on push/PR) would catch a regression before it lands rather than relying
+on manual discipline every session.
 
-### 15. Optional interactive mode (`HARNESS_INTERACTIVE=yes` / `--interactive`), default off
+### 19. Optional interactive mode (`HARNESS_INTERACTIVE=yes` / `--interactive`), default off
 Today the harness is always fully autonomous: `agent.py`'s
 `_AUTONOMOUS_SUFFIX` explicitly tells every agent "there's no user to ask,
 proceed on your own judgment, only stop via `finish`" — necessary because
@@ -186,11 +248,35 @@ feature — but real design work (the callback shape, how much of the
 verification/task-tracker retry loops still apply once a human is in the
 loop) belongs in a proper plan before implementation, not a quick patch.
 
+### 20. Unify timeout-safe verification for the agent-facing tool
+The harness-side verification pipeline's own `execute_check()` converts
+subprocess timeouts and launch errors into structured `CheckOutcome`
+values and closes stdin — but the legacy agent-facing `run_tests` tool's
+`_run_pytest`/`_run_npm_build` paths still call a bare
+`subprocess.run(..., timeout=300)` with no `except
+subprocess.TimeoutExpired` and no closed stdin, so they can raise instead
+of returning a useful observation, and can hang on stdin the same way
+`execute_check` was fixed to avoid. Route pytest, npm, and the other
+supported checks through the common executor, with closed stdin, CI/
+non-interactive environment handling, bounded output, and process-group
+cleanup. Add focused tests for timeout and missing-executable behavior.
+
+### 21. Handle ambiguous nested projects and monorepos explicitly
+`detect_project()` walks the tree and returns on the *first* matching
+manifest it finds (shallowest wins, then declaration order, then walk
+order) — it has no concept of "multiple candidate projects" at all. In a
+monorepo or workspace containing multiple applications, this can silently
+verify the wrong child project and produce a misleading result. Prefer an
+explicit project root when one is supplied; otherwise aggregate compatible
+projects or return an `ambiguous`/`inconclusive` result listing the
+candidates instead of choosing one based on directory-walk order. Add
+fixtures with multiple manifests.
+
 ---
 
-## not urgent
+## later
 
-### 16. Interactive-session smoke testing (drive `SOLVE`-style prompts)
+### 22. Interactive-session smoke testing (drive `SOLVE`-style prompts)
 Explicitly rejected as unscoped in `ROADMAP.md`'s decisions log: there's no
 general, safe way to guess what an arbitrary generated program expects to
 read on stdin, so a wrong guess produces either a misleading failure or
@@ -199,29 +285,42 @@ script or genuine interactive-session automation — real, open-ended
 design work, not a quick addition. Documented as a known permanent gap
 rather than a near-term goal.
 
-### 17. Non-Python/Node/Go/Rust/Java ecosystems (Ruby, PHP, .NET, C/C++, …)
+### 23. Non-Python/Node/Go/Rust/Java ecosystems (Ruby, PHP, .NET, C/C++, …)
 Verification is intentionally scoped to "where project metadata makes the
 commands unambiguous" (per the original ask). Extending further is
 legitimate but speculative — no current task or project in this repo's
 history has needed it, so building it now is pure speculative coverage.
 
-### 18. Java verification in this project's own dev/CI environment
+### 24. Java verification in this project's own dev/CI environment
 Detection is solid; actual `mvn`/`gradle` execution is untested here
 because neither toolchain is installed in this dev machine or the Docker
 agent-server image. Low urgency: fixing it means adding a Maven/Gradle
 toolchain to the Docker image and dev setup for a language this project
 has never actually been asked to build, not fixing a code defect.
 
-### 19. Recursive entry-point discovery
+### 25. Recursive entry-point discovery
 Entry points are only checked at a Python project's root directory, not
 recursively — deliberate, since a deeper walk risks matching an unrelated
 `__main__` guard inside a vendored dependency. Revisit only if a real
 nested-entry-point project is actually seen; no evidence of that yet.
 
-### 20. `reasoning_summary` / `extended_thinking_budget` / `enable_encrypted_reasoning` wiring
+### 26. `reasoning_summary` / `extended_thinking_budget` / `enable_encrypted_reasoning` wiring
 The SDK exposes three more reasoning-related `LLM` fields beyond
 `reasoning_effort`. Deliberately left unwired: `reasoning_effort` is the
 only one that's provider-agnostic (matches the model-agnostic invariant)
 and the one the SDK's own docs recommend for new integrations; the others
 are provider-specific or legacy. Only worth adding if a specific provider
 integration actually needs one.
+
+### 27. Protect verification infrastructure from silent agent changes
+The agent can modify or remove tests, build scripts, lint configuration, or
+type-check configuration before the harness verifies the project. Prompt
+guidance says not to weaken checks (e.g. `skills/lifecycle/testing-and-
+verification.md`), but the harness has zero mechanical enforcement of
+this — a direct gap against `CLAUDE.md`'s golden rule 6 ("harness code
+must enforce iteration limits, verification, retries, and explicit
+completion states wherever possible"). Later, record relevant verification
+files before the run, compare them after edits, and report or reject
+changes to those files unless the task explicitly requested them. This
+requires a careful policy for legitimate test and configuration changes,
+so it is not a small patch.
