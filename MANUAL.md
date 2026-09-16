@@ -116,10 +116,10 @@ The agent's final message is printed to stdout, followed by a
 [Test verification](#test-verification) for what each state means. Exit code
 is `1` on a configuration error, a run-time error (printed to stderr as
 `Configuration error: ...` / `Error: ...` — not a raw traceback), or a
-`retry_exhausted`/`no_progress`/`timed_out`/`stuck` verification outcome;
-`0` for `verified` and `inconclusive` (the latter isn't an error — nothing
-was proven broken — but it's still printed so it isn't mistaken for a
-confirmed pass).
+`retry_exhausted`/`no_progress`/`timed_out`/`incomplete`/`stuck` verification
+outcome; `0` for `verified` and `inconclusive` (the latter isn't an error —
+nothing was proven broken — but it's still printed so it isn't mistaken for
+a confirmed pass).
 
 Examples:
 
@@ -252,8 +252,9 @@ once `status == "completed"`; `error` is set once `status == "failed"`.
 **`status == "completed"` only ever means the run didn't raise an
 exception — it is not proof the work is correct.** Check
 `verification_state` for that: one of `"verified"`, `"inconclusive"`,
-`"retry_exhausted"`, `"no_progress"`, `"timed_out"`, or `"stuck"` (see [Test
-verification](#test-verification) for what each means and when it's set), populated once `status` reaches
+`"retry_exhausted"`, `"no_progress"`, `"timed_out"`, `"incomplete"`, or
+`"stuck"` (see [Test verification](#test-verification) for what each means
+and when it's set), populated once `status` reaches
 `"completed"`. `completion_contract` is the structured record of what was
 actually checked: `{"goal", "acceptance_criteria", "verification_checks",
 "limitations"}` (same shape as `runner.py`'s `CompletionContract`).
@@ -796,15 +797,21 @@ confirmed live twice, in two different ways:
    project, pytest reports "no tests collected" (exit code `5`), which was
    (rightly, for a Python project) treated as "nothing to verify," but was a
    false pass here since the project isn't Python at all.
+3. Asked to create two `task_tracker` items and leave one `todo`, the agent
+   did exactly that and then called `finish` anyway — the same "declares
+   done, self-report doesn't match reality" pattern as the two above, just
+   surfaced through the built-in task-tracking tool instead of the project's
+   own tests.
 
 `HARNESS_VERIFY_TESTS=always` (the default) is the harness's own safety net
-against both: after every run, `runner.py` re-runs the project's own
-verification itself — via `run_tests_tool.run_full_verification()`, no LLM
-call involved (see [Custom tools](#custom-tools) for exactly what that
-checks, in any of Python/Node/Go/Rust/Java). The result is always one of six
-states, exposed as `verification_state` everywhere a result reaches a caller
-(CLI stdout, `GET /tasks/{id}`, the `WS /tasks/stream` `"result"` event —
-see [CLI reference](#cli-reference) / [Server mode](#server-mode-httpwebsocket)):
+against all three: after every run, `runner.py` first checks the agent's own
+`task_tracker` list (see "Task-tracker completion" below), then re-runs the
+project's own verification itself — via `run_tests_tool.run_full_verification()`,
+no LLM call involved (see [Custom tools](#custom-tools) for exactly what that
+checks, in any of Python/Node/Go/Rust/Java). The result is always one of
+seven states, exposed as `verification_state` everywhere a result reaches a
+caller (CLI stdout, `GET /tasks/{id}`, the `WS /tasks/stream` `"result"`
+event — see [CLI reference](#cli-reference) / [Server mode](#server-mode-httpwebsocket)):
 
 | State | Meaning |
 |---|---|
@@ -813,11 +820,28 @@ see [CLI reference](#cli-reference) / [Server mode](#server-mode-httpwebsocket))
 | `retry_exhausted` | A real failure (primary or any configured secondary check) was found and sent back to the agent to fix, but it was still failing — with the failure actually changing between attempts (see `no_progress` below for when it doesn't) — after `HARNESS_MAX_VERIFY_RETRIES` attempts. The harness appends its own message saying so plainly, rather than letting the agent's last (possibly optimistic) message stand as the final word. |
 | `no_progress` | A fix attempt was sent back to the agent, but the *very next* verification pass came back with the exact same failing check, same exit code, and the same output (only a run-duration footer, like pytest's `in 3.85s`, is allowed to differ) — meaning that specific attempt provably changed nothing observable. Stops immediately, before exhausting the rest of the retry budget, rather than spending it on further attempts already shown not to help. Confirmed live: an agent edited a comparison operator to "fix" a failing test twice in a row while its own explanatory messages degraded into fluent-sounding but empty prose (see ROADMAP.md's decisions log) — both edits were no-ops for that specific failure (a different code branch handled it), and pytest's output was identical before and after. This is a cheaper, more reliable signal than trying to judge whether the agent's own reasoning text still makes sense — it doesn't read the agent's prose at all, only the verification output. |
 | `timed_out` | A check exceeded its timeout (300s) and was killed — retried the same as a real failure (usually an infinite loop or a hang the agent introduced, worth one more attempt to fix), but kept as its own terminal state rather than folded into `retry_exhausted` if it's still timing out after the retry budget: a persistent hang is a different problem from a wrong answer, worth telling apart at a glance. (Two identical timeouts in a row are `no_progress`, not this — same rule as any other check.) |
-| `stuck` | The conversation's own `execution_status` (the SDK's stuck-loop/error detection) ended in `stuck` or `error` rather than a normal finish — verification isn't even attempted against a run that never reached a coherent stopping point. Checked before the initial verification pass and again after every retry. |
+| `incomplete` | The agent's own `task_tracker` list still had an item marked `todo`/`in_progress` after `HARNESS_MAX_VERIFY_RETRIES` automated follow-ups — see "Task-tracker completion" below. Project verification is skipped entirely in this case: a task the agent's own tracking says isn't finished can't be meaningfully "verified" by running its tests. |
+| `stuck` | The conversation's own `execution_status` (the SDK's stuck-loop/error detection) ended in `stuck` or `error` rather than a normal finish — verification isn't even attempted against a run that never reached a coherent stopping point. Checked before the initial verification pass and again after every retry, and before/during the task-tracker check too. |
 
-(A seventh value, `failed`, exists only as the momentary signal inside the
+(An eighth value, `failed`, exists only as the momentary signal inside the
 retry loop between "a check just failed" and "was it fixed, or did retries
 run out" — it never appears as a run's final `verification_state`.)
+
+**Task-tracker completion.** Independently of test verification,
+`runner.py` also checks the agent's own `task_tracker` tool state (one of
+the SDK's default tools, always registered by `get_default_tools()`) right
+after the agent's first run: it looks at the most recently observed task
+list and,
+if any item is still `todo`/`in_progress`, sends the agent a follow-up
+listing exactly which ones and re-runs it, bounded by the same
+`HARNESS_MAX_VERIFY_RETRIES` budget used for test-fix retries. If the agent
+never used `task_tracker` at all, or its list is already fully `done`,
+nothing happens — the tool's own guidance says trivial tasks don't need it,
+so an unused tracker is not treated as incomplete work. This runs *before*
+project verification, so a task left genuinely unfinished (per the agent's
+own tracking) is reported as `incomplete` without ever reaching — and
+potentially "passing" — a test suite that only covers the part that did get
+built.
 
 **`no_progress` is deliberately not based on reading the agent's own
 message text.** The SDK's own stuck-loop detector (`stuck_detection=True`
@@ -906,7 +930,15 @@ uv run pytest -q
   case), and the agent stuck/error-before-finish path (a fake `Conversation`
   whose `state.execution_status` reports `ConversationExecutionStatus.STUCK`/
   `ERROR`, confirmed against the real SDK enum — see ROADMAP.md's decisions
-  log).
+  log). Also covers `_enforce_task_tracker_completion` (no LLM): unused/
+  fully-done trackers aren't enforced, a pending item triggers a follow-up
+  that recovers on retry, retries exhausting with items still pending
+  reports `incomplete`, the stuck/error path before and during a retry, and
+  one `stream_task`-level integration test confirming an incomplete tracker
+  short-circuits project verification entirely (it's never even attempted)
+  — using real `ObservationEvent`/`TaskTrackerObservation` instances, not
+  bare mocks, so the `isinstance` check `_task_tracker_snapshot` relies on
+  is actually exercised.
 
 ## Known limitations
 

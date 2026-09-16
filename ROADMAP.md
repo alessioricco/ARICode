@@ -66,7 +66,23 @@ build plan. This file is the living, evolving companion to that static plan.
   `conversation.state.execution_status` before verifying (and again after
   every retry) so a stuck/errored run is reported as such rather than
   silently "completed" — see MANUAL.md "Test verification" and "Decisions
-  log" below for the full architecture.
+  log" below for the full architecture. Also runs
+  `_enforce_task_tracker_completion()` right after the initial
+  `conversation.run()`, before `_verify_and_report()` ever runs: scans
+  `conversation.state.events` for the most recently observed
+  `task_tracker` tool `ObservationEvent` and, if any item is still
+  `"todo"`/`"in_progress"`, resends a follow-up and re-runs the agent
+  (bounded by the same `HARNESS_MAX_VERIFY_RETRIES` budget, checking
+  `execution_status` before and after each retry the same way
+  `_verify_and_report` does) instead of trusting a `finish` call over the
+  agent's own task list. A `None` return (tool never used, or already
+  complete) is not a violation and falls through to `_verify_and_report`
+  as before; an unresolved list becomes the new `"incomplete"` terminal
+  `verification_state`, short-circuiting project verification entirely
+  (an incomplete task list means completion was never established, so
+  running tests to "verify" it would be building on a false premise). See
+  "Decisions log" below for why this reads live conversation events rather
+  than the tool's persisted `TASKS.json`.
 - `custom_tools/run_tests_tool.py` — a language-neutral verification
   pipeline in four explicit, independently-tested stages: **project
   detection** (`detect_project()`, one marker-file walk covering Python/
@@ -170,14 +186,6 @@ build plan. This file is the living, evolving companion to that static plan.
   persistence across restarts or multi-worker sharing is a bigger step.
 - **Milestone 3 live provider-swap proof** — blocked on a second provider key
   or local model endpoint (see table above).
-- **Harness-side `task_tracker`-completion enforcement** — deferred in favor
-  of trying the `_AUTONOMOUS_SUFFIX` prompt fix first (see "Known
-  limitations" below and the matching decisions-log entry for the
-  considered-and-rejected shape: `runner.py` inspecting the tracker after
-  `conversation.run()` and auto-resending "continue — N items remain" in a
-  loop). Only worth building if the prompt-only fix proves insufficient on
-  re-test; needs its own stop-condition/cost-control design (a runaway
-  "continue" loop is a real risk) before it's more than a sketch.
 - **JS/TS lint tools (ESLint, etc.) are not auto-detected from config** —
   a Node project's own `scripts.lint`/`scripts.typecheck` *are* now run if
   defined (added alongside the Go/Rust/Java generalization), but there's no
@@ -493,6 +501,64 @@ build plan. This file is the living, evolving companion to that static plan.
   guard, called from inside it) and its fixed counterpart.**
 
 ## Decisions log (why, not just what)
+
+- **Harness-side `task_tracker`-completion enforcement: read live
+  conversation events directly, not the tool's `TASKS.json` persistence
+  file — and a new `"incomplete"` `verification_state` that short-circuits
+  project verification, not a fold into an existing state.** This backlog
+  item was originally scoped as "inspect the tracker after
+  `conversation.run()` and auto-resend 'continue — N items remain'" — but
+  before implementing, read `openhands/tools/task_tracker/definition.py`
+  directly (not assumed) and found the tool's state actually lives in the
+  `TaskTrackerExecutor` instance's `self._task_list`, optionally mirrored
+  to `save_dir/TASKS.json` only when `conv_state.persistence_dir` is set —
+  and confirmed by reading `local_conversation.py` that `runner.py`'s
+  `Conversation(...)` call never passes `persistence_dir`, so that file is
+  never written in this harness's normal operation (`ConversationState`'s
+  own log line confirms it falls back to an in-memory store). Relying on
+  the file would have meant either always enabling persistence (a bigger,
+  unrelated behavior change) or silently no-op'ing in the harness's actual
+  default configuration. Instead reads `conversation.state.events`
+  directly — confirmed live (a real `Conversation` run, not assumed) that
+  it holds every `ObservationEvent` for the conversation's lifetime
+  regardless of persistence settings, and that a task_tracker call's
+  `ObservationEvent.tool_name` equals `TaskTrackerTool.name` (looked up
+  from the class, not hardcoded as the string `"task_tracker"`, in case a
+  future SDK version renames it) — so `_task_tracker_snapshot()` just scans
+  for the most recent one. Confirmed the whole mechanism against a live
+  repro built specifically to reproduce the target failure mode: asked the
+  agent to "create two tasks, mark one done, leave the other todo, then
+  finish" — it did exactly that and called finish anyway, the harness's new
+  check caught the pending item, sent a follow-up, and the agent then
+  actually completed it before finishing for real.
+  - **A dedicated `"incomplete"` terminal state, not folded into
+    `retry_exhausted`.** An unresolved task list is a different claim than
+    "a test kept failing": it means the harness never established
+    completion in the first place, so running project verification
+    afterward would be checking correctness of a task the agent's own
+    tracking says isn't finished — potentially reporting `verified` for
+    the one piece that got built while five others silently didn't (the
+    exact "1 of 6 items, declared success" failure this item was written
+    to close). `_enforce_task_tracker_completion` therefore runs *before*
+    `_verify_and_report` in `stream_task` and returns a terminal
+    `TaskOutcome` (short-circuiting verification entirely) rather than
+    letting an incomplete tracker be just another input into the existing
+    test-retry loop.
+  - **Reused `cfg.max_verify_retries` as the retry budget, not a new
+    `HARNESS_MAX_TASK_TRACKER_RETRIES` knob.** Both loops answer the same
+    underlying question — "how many automatic fix-then-recheck cycles are
+    we willing to spend before giving up and telling the caller manual
+    attention is needed" — and the original backlog note's own concern
+    ("a runaway 'continue' loop is a real risk... needs its own
+    stop-condition") is fully addressed by bounding on the existing,
+    already-battle-tested budget rather than inventing a second one a user
+    would have to separately understand and tune.
+  - **A tracker that was never used, or is already fully `done`, is not a
+    violation and is not reported at all** — matches the tool's own
+    description ("For single straightforward tasks, proceed with direct
+    implementation rather than creating tracking overhead"); treating an
+    unused tracker as incomplete work would punish the agent for correctly
+    judging a task too trivial to need it.
 
 - **Pinned `openhands-sdk`/`openhands-tools` to `==1.47.0` exactly, not a
   floating/caret range.** Both were unpinned since Milestone 1, which meant

@@ -397,6 +397,24 @@ def test_exits_nonzero_when_a_fix_attempt_made_no_progress(monkeypatch, capsys):
     assert "Verification: no_progress" in out
 
 
+def test_exits_nonzero_when_task_tracker_left_incomplete(monkeypatch, capsys):
+    def _fake_run_task(task, cfg=None):
+        return _fake_result(
+            [_FakeMessage("finished")],
+            verification_state="incomplete",
+            limitations=["The agent's own task_tracker list still shows unfinished item(s)"],
+        )
+
+    monkeypatch.setattr(cli, "load_config", lambda: _cfg())
+    monkeypatch.setattr(cli, "run_task", _fake_run_task)
+
+    exit_code = cli.main(["do something"])
+
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "Verification: incomplete" in out
+
+
 def test_exits_nonzero_when_agent_got_stuck(monkeypatch, capsys):
     def _fake_run_task(task, cfg=None):
         return _fake_result([], verification_state="stuck")

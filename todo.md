@@ -29,15 +29,19 @@ attaches a policy that pauses before each tool call") that currently does
 nothing — a user who sets it gets silent no-op safety, not the safety they
 asked for. Needs `/verify-sdk` on the SDK's confirmation-policy API first.
 
-### 3. Harness-side `task_tracker`-completion enforcement
-Currently only a prompt-level mitigation (`_AUTONOMOUS_SUFFIX`) for the
-"agent declares done with incomplete `task_tracker` items" failure mode
-logged in `ROADMAP.md`. Prompt steering is soft and has already been shown
-insufficient for a structurally similar issue (the `finish`-while-tests-fail
-case, which needed real harness-side verification, not just a suffix). A
-mechanical check — inspect the tracker state after `conversation.run()` and
-require completion before trusting `finish` — closes a real
-correctness/trust gap, not just a nice-to-have polish item.
+### 3. ~~Harness-side `task_tracker`-completion enforcement~~ — DONE
+Added `_enforce_task_tracker_completion()` (`runner.py`), which runs right
+after the agent's first turn and before project verification: scans
+`conversation.state.events` for the most recently observed `task_tracker`
+tool state, and if any item is still `todo`/`in_progress`, sends a
+follow-up and re-runs the agent (bounded by `HARNESS_MAX_VERIFY_RETRIES`).
+An unresolved list becomes a new `"incomplete"` terminal `verification_state`
+that skips project verification entirely (a task the agent's own tracking
+says isn't finished can't be meaningfully "verified" by tests). Verified
+live end-to-end: reproduced the exact failure (create 2 tasks, leave one
+`todo`, call finish anyway), confirmed the harness caught it and the agent
+completed the item on the follow-up. See `ROADMAP.md` decisions log and
+`MANUAL.md` "Test verification" → "Task-tracker completion".
 
 ### 4. ~~Test coverage for `HARNESS_MAX_ITERATIONS`~~ — DONE
 Added `tests/test_runner.py::test_stream_task_wires_max_iterations_to_conversation`

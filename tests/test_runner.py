@@ -10,11 +10,14 @@ provider-agnostic: this test never hardcodes a model).
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
 from openhands.sdk import ConversationExecutionStatus
+from openhands.sdk.event import ObservationEvent
+from openhands.tools.task_tracker import TaskTrackerObservation, TaskTrackerTool
 
 from harness import runner
 from harness.config import Config, ConfigError, load_config
@@ -96,17 +99,28 @@ class _FakeConversation:
     one value per subsequent `.run()` call (a retry) to simulate the SDK
     transitioning into a stuck/error state mid-retry; once exhausted, status
     stays whatever it last was — a healthy retry that doesn't get stuck.
+
+    `initial_events`/`events_after_run` do the same for
+    `state.events` (consulted by `_enforce_task_tracker_completion`, not by
+    `_verify_and_report`) — `events_after_run` values are appended, one per
+    `.run()` call, standing in for a task_tracker observation the agent
+    produced during that retry.
     """
 
     def __init__(
         self,
         initial_status: ConversationExecutionStatus = ConversationExecutionStatus.FINISHED,
         statuses_after_run: list[ConversationExecutionStatus] | None = None,
+        initial_events: list | None = None,
+        events_after_run: list | None = None,
     ) -> None:
         self.sent_messages: list[str] = []
         self.run_calls = 0
-        self.state = SimpleNamespace(execution_status=initial_status)
+        self.state = SimpleNamespace(
+            execution_status=initial_status, events=list(initial_events or [])
+        )
         self._statuses_after_run = list(statuses_after_run or [])
+        self._events_after_run = list(events_after_run or [])
 
     def send_message(self, message: str) -> None:
         self.sent_messages.append(message)
@@ -115,6 +129,25 @@ class _FakeConversation:
         self.run_calls += 1
         if self._statuses_after_run:
             self.state.execution_status = self._statuses_after_run.pop(0)
+        if self._events_after_run:
+            self.state.events.append(self._events_after_run.pop(0))
+
+
+def _task_list_event(*items: dict) -> ObservationEvent:
+    """A real `ObservationEvent` wrapping a real `TaskTrackerObservation` —
+    constructed for real (not a bare mock) so `isinstance(event,
+    ObservationEvent)` checks in `_task_tracker_snapshot` exercise the same
+    type check production code relies on.
+    """
+    observation = TaskTrackerObservation.from_text(
+        text="task list", command="plan", task_list=list(items)
+    )
+    return ObservationEvent(
+        tool_name=TaskTrackerTool.name,
+        tool_call_id="call_1",
+        observation=observation,
+        action_id="act_1",
+    )
 
 
 # --- verify_tests=never: verification is skipped entirely ------------------
@@ -362,6 +395,163 @@ def test_agent_gets_stuck_mid_retry(monkeypatch):
     assert "stuck" in emitted[0].content[0].text.lower()
     assert outcome.verification_state == "stuck"
     assert outcome.retries_used == 1
+
+
+# --- task_tracker completion enforcement ------------------------------------
+#
+# Regression coverage for the "agent declares done with incomplete
+# task_tracker items" failure mode logged in ROADMAP.md: prior to this,
+# only a prompt-level mitigation (_AUTONOMOUS_SUFFIX) existed, which is soft
+# and unverifiable by a test. Live-confirmed the exact failure this guards
+# against: given "create two tasks, mark one done, leave the other todo,
+# then finish", the agent did exactly that and called finish anyway — see
+# ROADMAP.md's decisions log for the transcript.
+
+
+def test_task_tracker_never_used_is_not_enforced():
+    # The tool's own guidance says trivial tasks don't need it — no
+    # task_tracker observation at all must not be treated as a violation.
+    conversation = _FakeConversation()
+    emitted = []
+    outcome = runner._enforce_task_tracker_completion(
+        conversation, _cfg(max_verify_retries=2), emitted.append, "do the thing"
+    )
+
+    assert outcome is None
+    assert conversation.run_calls == 0
+    assert emitted == []
+
+
+def test_task_tracker_all_done_is_not_enforced():
+    conversation = _FakeConversation(
+        initial_events=[_task_list_event({"title": "A", "status": "done"})]
+    )
+    outcome = runner._enforce_task_tracker_completion(
+        conversation, _cfg(max_verify_retries=2), lambda _m: None, "do the thing"
+    )
+
+    assert outcome is None
+    assert conversation.run_calls == 0
+
+
+def test_task_tracker_pending_item_triggers_followup_then_recovers():
+    conversation = _FakeConversation(
+        initial_events=[
+            _task_list_event({"title": "A", "status": "done"}, {"title": "B", "status": "todo"})
+        ],
+        events_after_run=[
+            _task_list_event({"title": "A", "status": "done"}, {"title": "B", "status": "done"})
+        ],
+    )
+    emitted = []
+    outcome = runner._enforce_task_tracker_completion(
+        conversation, _cfg(max_verify_retries=2), emitted.append, "do the thing"
+    )
+
+    assert conversation.run_calls == 1
+    assert len(conversation.sent_messages) == 1
+    assert "task_tracker" in conversation.sent_messages[0]
+    assert "B" in conversation.sent_messages[0]
+    assert emitted == []  # recovered — no give-up notice
+    assert outcome is None  # complete now — stream_task proceeds to _verify_and_report
+
+
+def test_task_tracker_exhausts_retries_and_emits_giveup_notice():
+    conversation = _FakeConversation(
+        initial_events=[_task_list_event({"title": "B", "status": "todo"})],
+        events_after_run=[
+            _task_list_event({"title": "B", "status": "in_progress"}),
+            _task_list_event({"title": "B", "status": "in_progress"}),
+        ],
+    )
+    emitted = []
+    outcome = runner._enforce_task_tracker_completion(
+        conversation, _cfg(max_verify_retries=2), emitted.append, "do the thing"
+    )
+
+    assert conversation.run_calls == 2
+    assert outcome is not None
+    assert outcome.verification_state == "incomplete"
+    assert outcome.retries_used == 2
+    assert outcome.success is False
+    assert len(emitted) == 1
+    assert "task_tracker" in emitted[0].content[0].text
+    assert "B" in emitted[0].content[0].text
+    assert any("B" in note for note in outcome.completion_contract.limitations)
+    assert outcome.completion_contract.verification_checks == []
+
+
+def test_task_tracker_stuck_before_check_is_reported_as_stuck():
+    conversation = _FakeConversation(
+        initial_status=ConversationExecutionStatus.STUCK,
+        initial_events=[_task_list_event({"title": "B", "status": "todo"})],
+    )
+    emitted = []
+    outcome = runner._enforce_task_tracker_completion(
+        conversation, _cfg(max_verify_retries=2), emitted.append, "do the thing"
+    )
+
+    assert conversation.run_calls == 0  # never even tried to follow up on a stuck run
+    assert outcome is not None
+    assert outcome.verification_state == "stuck"
+    assert len(emitted) == 1
+
+
+def test_task_tracker_gets_stuck_mid_retry():
+    conversation = _FakeConversation(
+        initial_events=[_task_list_event({"title": "B", "status": "todo"})],
+        statuses_after_run=[ConversationExecutionStatus.STUCK],
+    )
+    emitted = []
+    outcome = runner._enforce_task_tracker_completion(
+        conversation, _cfg(max_verify_retries=2), emitted.append, "do the thing"
+    )
+
+    assert conversation.run_calls == 1  # got stuck on the first retry, no second attempt
+    assert outcome is not None
+    assert outcome.verification_state == "stuck"
+    assert outcome.retries_used == 1
+
+
+def test_task_tracker_short_circuits_project_verification_when_still_incomplete(monkeypatch):
+    # Integration check for the full stream_task wiring, not just the unit
+    # function in isolation: an incomplete task_tracker list must prevent
+    # project verification from ever running under a false premise of
+    # completeness.
+    class _Conversation:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+            self.run_calls = 0
+            self.state = SimpleNamespace(
+                execution_status=ConversationExecutionStatus.FINISHED,
+                events=[_task_list_event({"title": "B", "status": "todo"})],
+            )
+
+        def send_message(self, message: str) -> None:
+            pass
+
+        def run(self) -> None:
+            self.run_calls += 1  # stays incomplete across every retry
+
+    verification_calls = {"count": 0}
+    monkeypatch.setattr(
+        runner,
+        "_run_verification",
+        lambda _dir: (
+            verification_calls.__setitem__("count", verification_calls["count"] + 1)
+            or _run(_check(summary="3 passed"))
+        ),
+    )
+    monkeypatch.setattr(runner, "Conversation", _Conversation)
+    monkeypatch.setattr(runner, "build_agent", lambda cfg: "fake-agent")
+    monkeypatch.setattr(runner, "build_workspace", lambda cfg: nullcontext("fake-workspace"))
+
+    outcome = runner.stream_task(
+        "do the thing", cfg=_cfg(verify_tests="always", max_verify_retries=1)
+    )
+
+    assert outcome.verification_state == "incomplete"
+    assert verification_calls["count"] == 0  # project verification never reached
 
 
 # --- completion contract -----------------------------------------------------
@@ -756,7 +946,9 @@ class _RecordingConversation:
 
     def __init__(self, **kwargs: object) -> None:
         self.kwargs = kwargs
-        self.state = SimpleNamespace(execution_status=ConversationExecutionStatus.FINISHED)
+        self.state = SimpleNamespace(
+            execution_status=ConversationExecutionStatus.FINISHED, events=[]
+        )
         _RecordingConversation.instances.append(self)
 
     def send_message(self, message: str) -> None:

@@ -184,15 +184,21 @@ def main(argv: list[str] | None = None) -> int:
     # (possibly optimistic) last message stand as the only signal — see
     # runner.py's TaskOutcome / MANUAL.md "Test verification". A task whose
     # verification failed and couldn't be fixed, made no observable progress
-    # on a fix attempt, kept timing out, or whose run never reached a
-    # coherent finish, is a nonzero exit; "inconclusive" (nothing runnable
-    # to check) is not an error but is still printed so it isn't mistaken
-    # for a confirmed pass.
+    # on a fix attempt, kept timing out, whose own task_tracker list was
+    # left incomplete, or whose run never reached a coherent finish, is a
+    # nonzero exit; "inconclusive" (nothing runnable to check) is not an
+    # error but is still printed so it isn't mistaken for a confirmed pass.
     outcome = messages.outcome
     print(f"\nVerification: {outcome.verification_state}")
     for note in outcome.completion_contract.limitations:
         print(f"  - {note}")
-    if outcome.verification_state in ("retry_exhausted", "no_progress", "timed_out", "stuck"):
+    if outcome.verification_state in (
+        "retry_exhausted",
+        "no_progress",
+        "timed_out",
+        "incomplete",
+        "stuck",
+    ):
         return 1
     return 0
 

@@ -18,23 +18,28 @@ from openhands.sdk import (
     Message,
     TextContent,
 )
+from openhands.sdk.event import ObservationEvent
+from openhands.tools.task_tracker import TaskTrackerTool
 
 from .agent import build_agent
 from .config import Config, load_config
 from .custom_tools.run_tests_tool import CheckOutcome, VerificationRun, run_full_verification
 from .workspace import build_workspace
 
-# The seven terminal states a task run can end in. Exactly these because
+# The eight terminal states a task run can end in. Exactly these because
 # they're the ones a caller needs to tell apart to know whether to trust a
 # "done" claim: real, confirmed success; no evidence either way; a confirmed
 # problem that automated retries couldn't fix; a fix attempt that produced
 # no observable change at all (see `_failure_signature` below — a distinct
 # problem from "still failing differently"); a check that kept exceeding its
 # timeout even after retries (a distinct failure mode from a genuine failure
-# — usually a hang/infinite loop, not a wrong answer); and a run that never
-# reached a coherent finish at all. "failed" itself is never a *final* value
-# here — it's the transient signal inside the retry loop between "a check
-# just failed" and "was it fixed, or did retries run out" (see
+# — usually a hang/infinite loop, not a wrong answer); the agent's own
+# task_tracker list still showing unfinished work after automated follow-up
+# (see `_enforce_task_tracker_completion` — distinct from every check above
+# since it's caught before project verification even runs); and a run that
+# never reached a coherent finish at all. "failed" itself is never a *final*
+# value here — it's the transient signal inside the retry loop between "a
+# check just failed" and "was it fixed, or did retries run out" (see
 # `_verify_and_report`); it's listed because `VerificationRun.state`
 # (run_tests_tool.py) uses the same vocabulary and a caller may inspect a
 # `TaskOutcome.checks` mid-analysis. See MANUAL.md "Test verification" and
@@ -46,6 +51,7 @@ VERIFICATION_STATES = (
     "retry_exhausted",
     "no_progress",
     "timed_out",
+    "incomplete",
     "stuck",
 )
 
@@ -399,6 +405,152 @@ def _verify_and_report(
     )
 
 
+def _task_tracker_snapshot(conversation: Conversation) -> list | None:
+    """Return the task_tracker tool's most recently observed task list (a
+    list of TaskItem-shaped objects with `.title`/`.status`/`.notes` —
+    `TaskItem` itself isn't part of `openhands.tools.task_tracker`'s public
+    `__all__`, so accessed structurally here rather than imported), or
+    `None` if the tool was never invoked in this conversation.
+
+    `None` is deliberately not a violation: the tool's own description says
+    trivial, single-step tasks don't need it, and `get_default_tools()`
+    always includes it whether or not a given task calls for it. Confirmed
+    live (not assumed) that `conversation.state.events` holds every
+    `ObservationEvent` for the conversation's lifetime — including ones
+    from earlier `conversation.run()` calls — and that `ObservationEvent
+    .tool_name` for a task_tracker call equals `TaskTrackerTool.name`
+    (`"task_tracker"`, derived from the class name, not hardcoded here in
+    case a future SDK version renames it).
+    """
+    snapshot: list | None = None
+    for event in conversation.state.events:
+        if isinstance(event, ObservationEvent) and event.tool_name == TaskTrackerTool.name:
+            snapshot = list(getattr(event.observation, "task_list", []))
+    return snapshot
+
+
+def _pending_task_items(task_list: list) -> list:
+    return [item for item in task_list if item.status != "done"]
+
+
+def _task_tracker_followup(pending: list) -> str:
+    lines = "\n".join(
+        f"- [{item.status}] {item.title}" + (f" — {item.notes}" if item.notes else "")
+        for item in pending
+    )
+    return (
+        "Harness check: your own task_tracker list still has the following "
+        f"item(s) not marked done:\n\n{lines}\n\n"
+        "If the task is genuinely complete, use task_tracker to mark each "
+        "item done (or remove it if it no longer applies) before finishing "
+        "again. If an item is truly blocked, say so explicitly in your "
+        "final message and explain why — do not leave it as 'todo' or "
+        "'in_progress' and declare the task finished anyway."
+    )
+
+
+def _task_tracker_completion_contract(task: str, pending: list) -> CompletionContract:
+    pending_desc = "; ".join(f"'{item.title}' ({item.status})" for item in pending)
+    return CompletionContract(
+        goal=task,
+        acceptance_criteria=[
+            "The task described in the original request is implemented.",
+            ("The agent's own task_tracker list has no items left as 'todo' or 'in_progress'."),
+        ],
+        verification_checks=[],
+        limitations=[
+            (
+                "The agent's own task_tracker list still shows unfinished "
+                f"item(s) after automated follow-up ({pending_desc}); project "
+                "verification checks were not run, since completion was never "
+                "established."
+            )
+        ],
+    )
+
+
+def _enforce_task_tracker_completion(
+    conversation: Conversation, cfg: Config, emit: Callable[[Message], None], task: str
+) -> TaskOutcome | None:
+    """Post-hoc safety net for `_AUTONOMOUS_SUFFIX`'s "never leave your own
+    task_tracker list incomplete" instruction: inspect the agent's own
+    task_tracker state directly instead of trusting its finish message —
+    the same "verify, don't trust the self-report" principle
+    `_verify_and_report` already applies to test results (see ROADMAP.md).
+
+    Returns `None` when there's nothing to enforce (the tool was never
+    used, or its last known state already has no pending items) so
+    `stream_task` proceeds to `_verify_and_report`; returns a terminal
+    `TaskOutcome` only if the agent gets stuck/errors mid-retry or the
+    retry budget is exhausted with items still pending. Reuses
+    `cfg.max_verify_retries` as the retry budget — the same "how many
+    automatic fix-then-recheck cycles are we willing to spend" question
+    `_verify_and_report` already answers for test failures, not a second,
+    near-duplicate config knob for this closely related concern.
+    """
+    status = conversation.state.execution_status
+    if status in _ABORTED_STATUSES:
+        contract = _build_completion_contract(task, None, skipped=False, aborted=True)
+        _emit_notice(
+            emit,
+            "Harness check: the agent's run ended in a "
+            f"'{status.value}' state before its task_tracker completion "
+            "could be checked. This task needs manual attention.",
+        )
+        return TaskOutcome(verification_state="stuck", completion_contract=contract)
+
+    snapshot = _task_tracker_snapshot(conversation)
+    if snapshot is None:
+        return None
+    pending = _pending_task_items(snapshot)
+    if not pending:
+        return None
+
+    attempts_left = cfg.max_verify_retries
+    retries_used = 0
+    while pending:
+        if attempts_left <= 0:
+            contract = _task_tracker_completion_contract(task, pending)
+            summary = "; ".join(f"'{item.title}' ({item.status})" for item in pending)
+            _emit_notice(
+                emit,
+                "Harness check: the agent's own task_tracker list still "
+                f"shows unfinished item(s) after {cfg.max_verify_retries} "
+                f"automated follow-up(s) ({summary}). Giving up — this "
+                "task needs manual attention.",
+            )
+            return TaskOutcome(
+                verification_state="incomplete",
+                completion_contract=contract,
+                retries_used=retries_used,
+            )
+        attempts_left -= 1
+        retries_used += 1
+        conversation.send_message(_task_tracker_followup(pending))
+        conversation.run()
+
+        retry_status = conversation.state.execution_status
+        if retry_status in _ABORTED_STATUSES:
+            contract = _build_completion_contract(task, None, skipped=False, aborted=True)
+            _emit_notice(
+                emit,
+                "Harness check: the agent got stuck "
+                f"(status '{retry_status.value}') while following up on its "
+                f"own incomplete task_tracker list, after {retries_used} "
+                "attempt(s). This task needs manual attention.",
+            )
+            return TaskOutcome(
+                verification_state="stuck",
+                completion_contract=contract,
+                retries_used=retries_used,
+            )
+
+        snapshot = _task_tracker_snapshot(conversation) or []
+        pending = _pending_task_items(snapshot)
+
+    return None
+
+
 def stream_task(
     task: str, cfg: Config | None = None, on_message: Callable[[Message], None] | None = None
 ) -> TaskOutcome:
@@ -429,6 +581,9 @@ def stream_task(
         )
         conversation.send_message(task)
         conversation.run()
+        tracker_outcome = _enforce_task_tracker_completion(conversation, cfg, emit, task)
+        if tracker_outcome is not None:
+            return tracker_outcome
         return _verify_and_report(conversation, cfg, emit, task)
 
 
