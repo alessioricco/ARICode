@@ -74,13 +74,21 @@ def _resolve_cfg(
     model: str | None = None,
     api_key: str | None = None,
     base_url: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> Config:
     if agents_md is not None and project is None:
         raise ValueError("agents_md requires project")
 
     cfg = load_config()
-    if model is not None or api_key is not None or base_url is not None:
-        cfg = override_llm(cfg, model=model, api_key=api_key, base_url=base_url)
+    if (
+        model is not None
+        or api_key is not None
+        or base_url is not None
+        or reasoning_effort is not None
+    ):
+        cfg = override_llm(
+            cfg, model=model, api_key=api_key, base_url=base_url, reasoning_effort=reasoning_effort
+        )
     if execution is not None:
         cfg = replace(cfg, execution=execution)
     if project is not None:
@@ -147,6 +155,7 @@ def create_app():
         model: str | None = None
         api_key: str | None = None
         base_url: str | None = None
+        reasoning_effort: str | None = None
 
     class ChatMessage(BaseModel):
         role: str
@@ -168,6 +177,7 @@ def create_app():
         llm_model: str | None = None
         llm_api_key: str | None = None
         llm_base_url: str | None = None
+        llm_reasoning_effort: str | None = None
 
     app = FastAPI(title="Coding-Agent Harness")
     tasks: dict[str, _TaskRecord] = {}
@@ -214,6 +224,7 @@ def create_app():
                 model=request.model,
                 api_key=request.api_key,
                 base_url=request.base_url,
+                reasoning_effort=request.reasoning_effort,
             )
         except (ConfigError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -261,6 +272,7 @@ def create_app():
                 model=request.model,
                 api_key=request.api_key,
                 base_url=request.base_url,
+                reasoning_effort=request.reasoning_effort,
             )
         except (ConfigError, ValueError) as exc:
             await websocket.send_json({"type": "error", "detail": str(exc)})
@@ -323,10 +335,11 @@ def create_app():
         `request.model` isn't a safe stand-in for an explicit override since
         a strict OpenAI client's value there may not be a LiteLLM-style
         "provider/model" id at all. Callers who want to experiment with a
-        different provider/model for a request, without touching `.env`, use
-        the separate `llm_model`/`llm_api_key`/`llm_base_url` extension
-        fields instead — same override mechanism as `TaskRequest`'s
-        `model`/`api_key`/`base_url`.
+        different provider/model/reasoning-effort for a request, without
+        touching `.env`, use the separate `llm_model`/`llm_api_key`/
+        `llm_base_url`/`llm_reasoning_effort` extension fields instead — same
+        override mechanism as `TaskRequest`'s `model`/`api_key`/`base_url`/
+        `reasoning_effort`.
 
         Chat history isn't replayed: every `system` message is concatenated
         as leading context, the *last* `user` message is the task, and prior
@@ -343,6 +356,7 @@ def create_app():
                 model=request.llm_model,
                 api_key=request.llm_api_key,
                 base_url=request.llm_base_url,
+                reasoning_effort=request.llm_reasoning_effort,
             )
         except (ConfigError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -302,6 +302,24 @@ def test_no_llm_override_flags_leaves_config_untouched(monkeypatch):
     assert calls["cfg"].api_key == "key"
 
 
+def test_reasoning_effort_flag_overrides_config(monkeypatch):
+    calls = {}
+
+    def _fake_run_task(task, cfg=None):
+        calls["cfg"] = cfg
+        return _fake_result()
+
+    monkeypatch.setattr(cli, "load_config", lambda: _cfg())
+    monkeypatch.setattr(cli, "run_task", _fake_run_task)
+
+    exit_code = cli.main(["do something", "--reasoning-effort", "low"])
+
+    assert exit_code == 0
+    assert calls["cfg"].reasoning_effort == "low"
+    # Untouched fields keep their configured values.
+    assert calls["cfg"].model == "openai/gpt-4o"
+
+
 def test_blank_model_override_reports_config_error(monkeypatch, capsys):
     def _fail_if_called(*args, **kwargs):
         raise AssertionError("run_task should not be called")

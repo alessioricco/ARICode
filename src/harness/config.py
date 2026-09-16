@@ -77,6 +77,16 @@ class Config:
     verify_tests: str = DEFAULT_VERIFY_TESTS  # one of VERIFY_TESTS_MODES
     max_verify_retries: int = DEFAULT_MAX_VERIFY_RETRIES
 
+    # Provider-neutral reasoning effort, consumed by llm.py and passed
+    # straight through to the SDK's own `LLM.reasoning_effort` (LiteLLM
+    # translates it per-provider — see ROADMAP.md's decisions log).
+    # Deliberately not validated against a fixed choice list: the SDK's own
+    # field accepts forward-compatible values beyond its documented ones
+    # ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', ...), so
+    # this harness shouldn't reject one it doesn't yet know about. None
+    # means "don't override" — the SDK's own default ('high') applies.
+    reasoning_effort: str | None = None
+
 
 def _clean(value: str | None) -> str | None:
     """Trim whitespace; treat empty string as absent."""
@@ -143,6 +153,7 @@ def load_config(env: Mapping[str, str] | None = None, *, dotenv_path: str = ".en
             "LLM_API_KEY is required unless LLM_BASE_URL is set (e.g. a local "
             "Ollama/vLLM/LM Studio endpoint that needs no key)."
         )
+    reasoning_effort = _clean(env.get("LLM_REASONING_EFFORT"))
 
     workspace = _clean(env.get("HARNESS_WORKSPACE")) or DEFAULT_WORKSPACE
     max_iterations = _parse_positive_int(
@@ -197,6 +208,7 @@ def load_config(env: Mapping[str, str] | None = None, *, dotenv_path: str = ".en
         docker_platform=docker_platform,
         verify_tests=verify_tests,
         max_verify_retries=max_verify_retries,
+        reasoning_effort=reasoning_effort,
     )
 
 
@@ -206,14 +218,17 @@ def override_llm(
     model: str | None = None,
     api_key: str | None = None,
     base_url: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> Config:
-    """Return a copy of `cfg` with LLM_MODEL/LLM_API_KEY/LLM_BASE_URL overridden.
+    """Return a copy of `cfg` with LLM_MODEL/LLM_API_KEY/LLM_BASE_URL/
+    LLM_REASONING_EFFORT overridden.
 
     Lets a single call (CLI flag or a server request field) swap provider/model
-    for one run without touching `.env` — e.g. to compare how two models handle
-    the same task. Only arguments that are not None are applied; anything else
-    keeps `cfg`'s existing value. Does not re-validate the
-    api_key-or-base_url-required rule from `load_config` — `cfg` already
+    (or just the reasoning effort, independent of provider) for one run without
+    touching `.env` — e.g. to compare how two models, or two effort levels of
+    the same model, handle the same task. Only arguments that are not None are
+    applied; anything else keeps `cfg`'s existing value. Does not re-validate
+    the api_key-or-base_url-required rule from `load_config` — `cfg` already
     satisfied it, and an override is additive, not a fresh load.
     """
     updates: dict[str, str | None] = {}
@@ -226,4 +241,6 @@ def override_llm(
         updates["api_key"] = _clean(api_key)
     if base_url is not None:
         updates["base_url"] = _clean(base_url)
+    if reasoning_effort is not None:
+        updates["reasoning_effort"] = _clean(reasoning_effort)
     return replace(cfg, **updates) if updates else cfg

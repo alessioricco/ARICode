@@ -15,9 +15,20 @@ from .config import Config
 
 
 def build_llm(cfg: Config) -> LLM:
+    # Only included when set: the SDK's own `reasoning_effort` field has a
+    # real default ("high") on the pydantic model itself, and passing
+    # `reasoning_effort=None` explicitly would override that default with an
+    # actual None rather than leaving it alone — the field's type is
+    # `Literal[...] | str | None`, so None is a distinct, accepted value, not
+    # "omitted". Omitting the kwarg entirely is what lets the SDK's own
+    # default apply when cfg.reasoning_effort is unset.
+    optional: dict[str, str] = {}
+    if cfg.reasoning_effort:
+        optional["reasoning_effort"] = cfg.reasoning_effort
     return LLM(
         usage_id="harness",
         model=cfg.model,
         base_url=cfg.base_url,
         api_key=SecretStr(cfg.api_key) if cfg.api_key else None,
+        **optional,
     )

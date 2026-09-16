@@ -23,11 +23,16 @@ build plan. This file is the living, evolving companion to that static plan.
 ## What's implemented
 
 - `config.py` — env parsing, model-agnostic (`LLM_MODEL` prefix selects provider).
-  `override_llm(cfg, model=, api_key=, base_url=)` returns a copy of `Config`
-  with only the given fields replaced — the per-request/per-run override
-  mechanism shared by `cli.py` and `server.py` (see MANUAL.md "Switching LLM
-  provider / model" → "Per-request override").
+  `override_llm(cfg, model=, api_key=, base_url=, reasoning_effort=)` returns
+  a copy of `Config` with only the given fields replaced — the per-request/
+  per-run override mechanism shared by `cli.py` and `server.py` (see
+  MANUAL.md "Switching LLM provider / model" → "Per-request override").
+  `reasoning_effort` (from `LLM_REASONING_EFFORT`) is provider-neutral and
+  deliberately not validated against a fixed choice list — see decisions log.
 - `llm.py` / `tools.py` / `agent.py` — SDK wiring; default preset tools + `run_tests`.
+  `llm.py`'s `build_llm()` only passes `reasoning_effort` to the SDK's `LLM(...)`
+  when `cfg.reasoning_effort` is set, so the SDK's own default (`"high"`)
+  applies when it's unset — see decisions log for the omit-vs-`None` subtlety.
   `agent.py`'s `AgentContext.system_message_suffix` also carries five
   behavioral policies, not just SDK plumbing: `_AUTONOMOUS_SUFFIX` (see
   "Known limitations" below), `_README_SUFFIX`, which tells every agent to
@@ -96,7 +101,7 @@ build plan. This file is the living, evolving companion to that static plan.
   this generalization was scoped this way, and for what's genuinely
   verified vs. only detected per language.
 - `cli.py` — `python -m harness "<task>" [--execution] [--project] [--agents-md]
-  [--model] [--api-key] [--base-url]`. `task` is resolved via
+  [--model] [--api-key] [--base-url] [--reasoning-effort]`. `task` is resolved via
   `resolve_task_source()`: http(s) URL (fetched) or an existing local file
   (read) take precedence over literal text. CLI-only — server mode's `task`
   field does not do this resolution.
@@ -110,10 +115,11 @@ build plan. This file is the living, evolving companion to that static plan.
   (live streaming), `GET /v1/models` + `POST /v1/chat/completions`
   (OpenAI-compatible adapter, streaming and non-streaming). All task-facing
   endpoints share one background thread + callback pattern. `POST /tasks` /
-  `WS /tasks/stream` accept optional `model`/`api_key`/`base_url` overrides
-  (via `config.override_llm`); `/v1/chat/completions` accepts the same thing
-  under `llm_model`/`llm_api_key`/`llm_base_url` — kept distinct from its
-  wire-mandated `model` field, which stays echo-only (see decisions log).
+  `WS /tasks/stream` accept optional `model`/`api_key`/`base_url`/
+  `reasoning_effort` overrides (via `config.override_llm`);
+  `/v1/chat/completions` accepts the same thing under `llm_model`/
+  `llm_api_key`/`llm_base_url`/`llm_reasoning_effort` — kept distinct from
+  its wire-mandated `model` field, which stays echo-only (see decisions log).
 - `skills.py` — two mechanisms, don't conflate them: `load_skill_catalog()`
   loads the shared, reusable, trigger-based catalog (`skills/`, arbitrary
   subfolders for classification) into every agent's `AgentContext`
@@ -1143,3 +1149,40 @@ build plan. This file is the living, evolving companion to that static plan.
     example script, and adds real cost (another tree walk) for a case not
     yet observed in practice. Documented as a real scope limit, revisitable
     if a nested-entry-point project is ever actually seen.
+- **`reasoning_effort` added as a fifth per-request LLM override field
+  (`config.py`/`llm.py`/`cli.py`/`server.py`), reusing `override_llm()`
+  rather than a parallel mechanism.** Prompted by "does our LLM abstraction
+  support a reasoning-level param, and if so wire it everywhere." Verified
+  the claim first rather than assuming it: read `openhands/sdk/llm/llm.py`
+  directly and found `LLM.reasoning_effort: Literal["low", "medium", "high",
+  "xhigh", "none"] | SkipJsonSchema[str] | None = "high"`, explicitly
+  documented as provider-neutral and forward-compatible (LiteLLM translates
+  it per-provider; the SDK's own docstring says it accepts values beyond the
+  ones listed). The SDK also exposes `reasoning_summary` (OpenAI-specific,
+  needs a verified org), `extended_thinking_budget` (legacy Anthropic-only
+  token budget — its own docstring says "prefer reasoning_effort for new
+  integrations"), and `enable_encrypted_reasoning` — none of these three were
+  wired in; `reasoning_effort` is the one the SDK itself recommends and the
+  only one that's provider-agnostic, matching this project's model-agnostic
+  invariant. Deliberately **not** validated against a fixed choice list in
+  `config.py` (unlike `CONFIRM_MODES`/`EXECUTION_MODES`/`VERIFY_TESTS_MODES`,
+  which use `_parse_choice()`): the SDK's own field type is deliberately
+  open-ended for forward compatibility, so a harness-side strict validator
+  would reject a legitimate future value before the SDK/LiteLLM even got a
+  chance to translate it. Two implementation subtleties worth remembering if
+  this pattern is repeated for a future field: (1) the new `Config` field had
+  to be added *after* every other field with a default, not merely after
+  `base_url` — a dataclass field with a default can't precede one without,
+  and `workspace` (no default) immediately followed `base_url`, so the naive
+  placement raised `TypeError` at import time; (2) `llm.py`'s `build_llm()`
+  must only pass `reasoning_effort=...` to `LLM(...)` when
+  `cfg.reasoning_effort` is actually set — pydantic treats an explicit
+  `reasoning_effort=None` as a real value distinct from "omitted," so passing
+  it unconditionally would silently override the SDK's own `"high"` default
+  with `None` whenever no override was configured; the fix builds a
+  conditional kwargs dict instead of passing the field directly. Also unlike
+  `model` (`override_llm(cfg, model="   ")` raises), a blank
+  `reasoning_effort` override does not raise — it clears back to "unset" so
+  the SDK's default applies, matching `api_key`/`base_url`'s leniency, since
+  "go back to the SDK default" is a legitimate thing to ask for and there's
+  no equivalent of `model`'s "can't run with nothing selected" failure mode.

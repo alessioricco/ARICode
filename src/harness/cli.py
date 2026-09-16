@@ -90,6 +90,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Override LLM_BASE_URL for this run only (e.g. to point at a local model endpoint).",
     )
     parser.add_argument(
+        "--reasoning-effort",
+        default=None,
+        help=(
+            "Override LLM_REASONING_EFFORT for this run only, without touching "
+            ".env — e.g. to compare how the same model behaves at different "
+            "effort levels. Common values: none | minimal | low | medium | "
+            "high | xhigh | max (provider-neutral; leave unset for the SDK's "
+            "own default)."
+        ),
+    )
+    parser.add_argument(
         "--project",
         default=None,
         help=(
@@ -124,8 +135,19 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         cfg = load_config()
-        if args.model is not None or args.api_key is not None or args.base_url is not None:
-            cfg = override_llm(cfg, model=args.model, api_key=args.api_key, base_url=args.base_url)
+        if (
+            args.model is not None
+            or args.api_key is not None
+            or args.base_url is not None
+            or args.reasoning_effort is not None
+        ):
+            cfg = override_llm(
+                cfg,
+                model=args.model,
+                api_key=args.api_key,
+                base_url=args.base_url,
+                reasoning_effort=args.reasoning_effort,
+            )
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 1

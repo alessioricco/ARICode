@@ -46,12 +46,14 @@ def test_minimal_valid_env_applies_defaults():
     assert cfg.docker_platform == DEFAULT_DOCKER_PLATFORM
     assert cfg.verify_tests == DEFAULT_VERIFY_TESTS
     assert cfg.max_verify_retries == DEFAULT_MAX_VERIFY_RETRIES
+    assert cfg.reasoning_effort is None
 
 
 def test_all_values_parsed():
     cfg = load_config(
         _base_env(
             LLM_BASE_URL="http://localhost:11434",
+            LLM_REASONING_EFFORT="low",
             HARNESS_WORKSPACE="/tmp/ws",
             HARNESS_MAX_ITERATIONS="12",
             HARNESS_CONFIRM_MODE="always",
@@ -75,6 +77,20 @@ def test_all_values_parsed():
     assert cfg.docker_platform == "linux/amd64"
     assert cfg.verify_tests == "never"
     assert cfg.max_verify_retries == 5
+    assert cfg.reasoning_effort == "low"
+
+
+def test_reasoning_effort_blank_treated_as_absent():
+    cfg = load_config(_base_env(LLM_REASONING_EFFORT="   "))
+    assert cfg.reasoning_effort is None
+
+
+def test_reasoning_effort_accepts_forward_compatible_value():
+    # Deliberately not validated against a fixed choice list — see config.py's
+    # comment on the field. A value the SDK/provider might add later must not
+    # be rejected here.
+    cfg = load_config(_base_env(LLM_REASONING_EFFORT="some-future-value"))
+    assert cfg.reasoning_effort == "some-future-value"
 
 
 def test_invalid_verify_tests_raises():
@@ -165,13 +181,40 @@ def test_override_llm_applies_all_fields():
     cfg = load_config(_base_env())
 
     overridden = override_llm(
-        cfg, model="ollama/llama3", api_key=None, base_url="http://localhost:11434"
+        cfg,
+        model="ollama/llama3",
+        api_key=None,
+        base_url="http://localhost:11434",
+        reasoning_effort="low",
     )
 
     assert overridden.model == "ollama/llama3"
     assert overridden.base_url == "http://localhost:11434"
+    assert overridden.reasoning_effort == "low"
     # api_key=None means "not overridden", not "cleared" -> unchanged.
     assert overridden.api_key == cfg.api_key
+
+
+def test_override_llm_reasoning_effort_only():
+    cfg = load_config(_base_env())
+
+    overridden = override_llm(cfg, reasoning_effort="xhigh")
+
+    assert overridden.reasoning_effort == "xhigh"
+    assert overridden.model == cfg.model
+    assert overridden.api_key == cfg.api_key
+    assert overridden.base_url == cfg.base_url
+
+
+def test_override_llm_blank_reasoning_effort_clears_it():
+    # Unlike model (which raises on blank), a blank reasoning_effort override
+    # clears it back to "unset" -> the SDK's own default applies. Matches
+    # api_key/base_url's leniency, not model's strictness.
+    cfg = load_config(_base_env(LLM_REASONING_EFFORT="low"))
+
+    overridden = override_llm(cfg, reasoning_effort="   ")
+
+    assert overridden.reasoning_effort is None
 
 
 def test_override_llm_no_args_returns_same_config():

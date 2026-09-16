@@ -187,6 +187,27 @@ def test_create_task_with_model_override_swaps_llm_without_env(monkeypatch):
     assert calls["cfg"].base_url == "http://localhost:11434"
 
 
+def test_create_task_with_reasoning_effort_override(monkeypatch):
+    calls = {}
+
+    def _fake_stream_task(task, cfg=None, on_message=None):
+        calls["cfg"] = cfg
+        return _fake_outcome()
+
+    monkeypatch.setattr(server, "load_config", lambda: _cfg(model="anthropic/claude-x"))
+    monkeypatch.setattr(server, "stream_task", _fake_stream_task)
+
+    client = TestClient(server.create_app())
+    response = client.post(
+        "/tasks",
+        json={"task": "do something", "reasoning_effort": "low"},
+    )
+    _wait_for_status(client, response.json()["task_id"])
+
+    assert calls["cfg"].reasoning_effort == "low"
+    assert calls["cfg"].model == "anthropic/claude-x"
+
+
 def test_create_task_without_override_keeps_configured_model(monkeypatch):
     calls = {}
 
@@ -484,6 +505,31 @@ def test_chat_completions_llm_model_override_swaps_model_not_wire_field(monkeypa
     # ...while the actual run used the llm_* override, not request.model.
     assert calls["cfg"].model == "openai/gpt-4o"
     assert calls["cfg"].api_key == "sk-other"
+
+
+def test_chat_completions_llm_reasoning_effort_override(monkeypatch):
+    calls = {}
+
+    def _fake_run_task(task, cfg=None):
+        calls["cfg"] = cfg
+        return [_FakeMessage("tool", "The answer is 4.")]
+
+    monkeypatch.setattr(server, "load_config", lambda: _cfg(model="anthropic/claude-x"))
+    monkeypatch.setattr(server, "run_task", _fake_run_task)
+
+    client = TestClient(server.create_app())
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "What is 2+2?"}],
+            "llm_reasoning_effort": "xhigh",
+        },
+    )
+
+    assert response.status_code == 200
+    assert calls["cfg"].reasoning_effort == "xhigh"
+    assert calls["cfg"].model == "anthropic/claude-x"
 
 
 def test_chat_completions_without_llm_override_keeps_configured_model(monkeypatch):
