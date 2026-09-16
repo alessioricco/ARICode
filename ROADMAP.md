@@ -204,9 +204,17 @@ build plan. This file is the living, evolving companion to that static plan.
   which `runner.py` never passed, so every run silently used `500`
   regardless of `.env`. Fixed in the same change by passing
   `max_iteration_per_run=cfg.max_iterations`. No test previously caught this
-  because no test asserted on iteration-capping behavior at all — worth a
-  dedicated live-verified test if this class of gap (a config value parsed
-  and validated but never actually consumed) recurs.
+  because no test asserted on iteration-capping behavior at all.
+  **Closed:** `tests/test_runner.py::test_stream_task_wires_max_iterations_to_conversation`
+  now monkeypatches `runner.Conversation`/`build_agent`/`build_workspace`
+  with recording fakes and asserts `stream_task()` actually calls
+  `Conversation(max_iteration_per_run=cfg.max_iterations, ...)` — no
+  LLM/network call, so it always runs (unlike the e2e smoke test, which
+  skips without an API key). Verified it actually catches this exact class
+  of regression by temporarily reverting the `max_iteration_per_run=...`
+  line and confirming the test fails with `KeyError:
+  'max_iteration_per_run'`, then restoring it and re-running the full suite
+  (241 passed).
 - Spec section 7's original custom-tool template didn't match the installed
   SDK (v1.47.0): `ToolDefinition` is subclassed with a `create(cls,
   conv_state, **params)` classmethod and an auto-derived `name` ClassVar, not

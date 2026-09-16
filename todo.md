@@ -39,15 +39,13 @@ mechanical check — inspect the tracker state after `conversation.run()` and
 require completion before trusting `finish` — closes a real
 correctness/trust gap, not just a nice-to-have polish item.
 
-### 4. Test coverage for `HARNESS_MAX_ITERATIONS`
-This was silently a no-op for the entire project history until a very
-recent fix (`runner.py` now passes `max_iteration_per_run=cfg.max_iterations`
-to `Conversation(...)`), and `docs/SPEC.md` section 12 lists "reliably
-bounds runaway loops" as an explicit acceptance criterion. No test asserts
-on iteration-capping behavior today, so a future regression (e.g. an SDK
-upgrade renaming/removing the kwarg) would go undetected exactly the same
-way the original bug did. A live/integration test closing this is cheap
-insurance against repeating a bug already paid for once.
+### 4. ~~Test coverage for `HARNESS_MAX_ITERATIONS`~~ — DONE
+Added `tests/test_runner.py::test_stream_task_wires_max_iterations_to_conversation`
+— a no-LLM unit test (monkeypatches `Conversation`/`build_agent`/
+`build_workspace`) asserting `stream_task()` passes
+`max_iteration_per_run=cfg.max_iterations` to `Conversation(...)`. Confirmed
+it actually catches the original regression class by temporarily reverting
+the fix and observing the test fail. See `ROADMAP.md` Known Limitations.
 
 ---
 

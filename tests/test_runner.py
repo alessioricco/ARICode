@@ -11,6 +11,7 @@ provider-agnostic: this test never hardcodes a model).
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 from openhands.sdk import ConversationExecutionStatus
@@ -724,6 +725,70 @@ def test_no_progress_applies_to_repeated_identical_timeouts_too(monkeypatch):
 
     assert outcome.verification_state == "no_progress"
     assert outcome.retries_used == 1
+
+
+# --- max_iteration_per_run is actually wired to Conversation ---------------
+
+
+class _FakeWorkspaceCM:
+    """Minimal context manager standing in for `build_workspace`'s return
+    value (`nullcontext(...)` for local execution, `DockerWorkspace` for
+    docker) — only `__enter__`/`__exit__` matter here.
+    """
+
+    def __init__(self, value: str) -> None:
+        self._value = value
+
+    def __enter__(self) -> str:
+        return self._value
+
+    def __exit__(self, *exc_info: object) -> bool:
+        return False
+
+
+class _RecordingConversation:
+    """Stands in for `openhands.sdk.Conversation`, recording the kwargs each
+    instance was constructed with (via the class-level `instances` list)
+    instead of driving a real LLM loop.
+    """
+
+    instances: ClassVar[list[_RecordingConversation]] = []
+
+    def __init__(self, **kwargs: object) -> None:
+        self.kwargs = kwargs
+        self.state = SimpleNamespace(execution_status=ConversationExecutionStatus.FINISHED)
+        _RecordingConversation.instances.append(self)
+
+    def send_message(self, message: str) -> None:
+        pass
+
+    def run(self) -> None:
+        pass
+
+
+def test_stream_task_wires_max_iterations_to_conversation(monkeypatch):
+    # Regression guard: HARNESS_MAX_ITERATIONS was parsed/validated by
+    # config.py from Milestone 1 onward but never actually passed to
+    # Conversation(...), so every run silently used the SDK's own default
+    # (500) regardless of .env — contrary to docs/SPEC.md section 12's
+    # acceptance criterion ("HARNESS_MAX_ITERATIONS reliably bounds runaway
+    # loops"). Found only by reading runner.py directly, not by any test —
+    # this asserts the kwarg is actually threaded through, so a future
+    # regression (e.g. an SDK upgrade renaming/removing the kwarg) fails
+    # loudly here instead of silently reverting to an unbounded default.
+    _RecordingConversation.instances = []
+    monkeypatch.setattr(runner, "Conversation", _RecordingConversation)
+    monkeypatch.setattr(runner, "build_agent", lambda cfg: "fake-agent")
+    monkeypatch.setattr(runner, "build_workspace", lambda cfg: _FakeWorkspaceCM("fake-workspace"))
+
+    outcome = runner.stream_task("do the thing", cfg=_cfg(verify_tests="never", max_iterations=17))
+
+    assert outcome.verification_state == "inconclusive"  # verify_tests="never" short-circuits
+    assert len(_RecordingConversation.instances) == 1
+    kwargs = _RecordingConversation.instances[0].kwargs
+    assert kwargs["max_iteration_per_run"] == 17
+    assert kwargs["agent"] == "fake-agent"
+    assert kwargs["workspace"] == "fake-workspace"
 
 
 def test_no_progress_check_does_not_apply_after_successful_recovery(monkeypatch):
