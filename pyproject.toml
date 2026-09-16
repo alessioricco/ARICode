@@ -6,9 +6,11 @@ requires-python = ">=3.12"
 dependencies = [
     # openhands-sdk and openhands-tools are a MATCHED SET: keep the two version
     # specifiers identical and upgrade them together, or imports will break.
-    # Pin to an exact version once a working one is confirmed, e.g. "==X.Y.Z".
-    "openhands-sdk",
-    "openhands-tools",
+    # Pinned to the version verified against this codebase (see ROADMAP.md
+    # "SDK-drift" entries) — bump both together deliberately, then re-verify
+    # every unconfirmed SDK symbol via /verify-sdk before relying on it.
+    "openhands-sdk==1.47.0",
+    "openhands-tools==1.47.0",
     "python-dotenv>=1.0",
 ]
 

@@ -15,14 +15,11 @@ outside our control).
 
 ## must
 
-### 1. Pin exact `openhands-sdk` / `openhands-tools` versions
-`pyproject.toml` still has both unpinned (`"openhands-sdk"`, `"openhands-tools"`
-with no version specifier) — open since Milestone 1. Every "SDK-drift"
-gotcha logged in `CLAUDE.md`/`ROADMAP.md` (the `get_default_tools()` import
-path, the `Action`/`Observation`/`Executor` pattern, `ConversationExecutionStatus`,
-etc.) can silently re-break on the next `uv pip install -e .` if a new SDK
-release ships. Pinning turns "breaks silently on next install" into "breaks
-loudly on a deliberate upgrade."
+### 1. ~~Pin exact `openhands-sdk` / `openhands-tools` versions~~ — DONE
+Pinned both to `==1.47.0` (the version already verified throughout
+`ROADMAP.md`'s SDK-drift entries) in `pyproject.toml`. Re-resolved
+(`uv pip install -e ".[dev]"`) and full suite re-run (240 passed). See
+`ROADMAP.md` decisions log for the full rationale.
 
 ### 2. `HARNESS_CONFIRM_MODE=always` — wire the pause-before-tool-call gate
 Parsed and validated in `config.py` but never connected to an actual

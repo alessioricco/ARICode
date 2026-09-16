@@ -168,8 +168,6 @@ build plan. This file is the living, evolving companion to that static plan.
 - **Server-mode task registry persistence/cleanup** — in-memory, per-process,
   unbounded. Needs at least a TTL-based purge; a real store (Redis/DB) for
   persistence across restarts or multi-worker sharing is a bigger step.
-- **Pin exact `openhands-sdk`/`openhands-tools` versions** in `pyproject.toml`
-  — currently unpinned floating deps; noted as an open item since Milestone 1.
 - **Milestone 3 live provider-swap proof** — blocked on a second provider key
   or local model endpoint (see table above).
 - **Harness-side `task_tracker`-completion enforcement** — deferred in favor
@@ -488,6 +486,28 @@ build plan. This file is the living, evolving companion to that static plan.
 
 ## Decisions log (why, not just what)
 
+- **Pinned `openhands-sdk`/`openhands-tools` to `==1.47.0` exactly, not a
+  floating/caret range.** Both were unpinned since Milestone 1, which meant
+  a plain `uv pip install -e .` could silently pull a newer SDK release at
+  any time — and this file's own "SDK-drift warning" (`CLAUDE.md`) already
+  documents two symbols (`get_default_tools()`'s import path, the
+  custom-tool `Action`/`Observation`/`Executor` pattern) that changed
+  between what the spec assumed and what the installed SDK actually
+  required. Checked the currently-installed version first
+  (`importlib.metadata.version(...)`, both `1.47.0`) rather than guessing —
+  it matches the version already named throughout this file's SDK-drift and
+  decisions-log entries (`ConversationExecutionStatus`, the `create(cls,
+  conv_state, **params)` tool pattern, etc.), so pinning to it locks in
+  exactly the API surface every prior verification in this file was actually
+  checked against. An exact pin (`==`), not a range, is deliberate: this
+  project's whole "verify-first" posture (`CLAUDE.md` golden rule 2) is
+  about not trusting SDK symbols we haven't re-checked, and a range would
+  let a minor/patch bump silently reintroduce that exact risk. Bumping the
+  version is now a deliberate, visible edit to `pyproject.toml` followed by
+  `/verify-sdk`, not something that happens as a side effect of routine
+  dependency installation. Verified against the full test suite
+  post-pin (`uv pip install -e ".[dev]"` re-resolves cleanly, `uv run pytest
+  -q` — 240 passed) rather than assumed safe.
 - **Docker execution — custom image, not `DockerDevWorkspace`.** The SDK's
   `DockerDevWorkspace` (on-the-fly image builds) is explicitly scoped to the
   SDK's own dev environment, not external projects. Built
