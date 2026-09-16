@@ -80,7 +80,12 @@ build plan. This file is the living, evolving companion to that static plan.
   (`agent.py`); `write_project_context()` writes a caller-supplied,
   project-specific `AGENTS.md` (CLI `--agents-md`, REST `agents_md`, both
   requiring `--project`/`project`). See MANUAL.md "Skills" for the full
-  writeup and CLAUDE.md-linked rationale.
+  writeup and CLAUDE.md-linked rationale. The catalog now includes five
+  downloaded (not authored) SDLC-lifecycle `SKILL.md` skills —
+  `requirements-analysis`, `implementation-planning`,
+  `testing-and-verification`, `security-review`, `release-readiness` —
+  adapted from the MIT-licensed `addyosmani/agent-skills` repo; see
+  "Decisions log" below for the sourcing/mapping rationale.
 
 ## Backlog — optional / not yet built
 
@@ -447,6 +452,52 @@ build plan. This file is the living, evolving companion to that static plan.
   the task_tracker-completion loop above was flagged as needing a stop
   condition — a project whose tests are simply wrong, or a bug genuinely
   beyond the model's ability to fix, must not loop forever.
+- **Five SDLC skills (`requirements-analysis`, `implementation-planning`,
+  `testing-and-verification`, `security-review`, `release-readiness`)
+  downloaded from `addyosmani/agent-skills`, not authored, per explicit user
+  instruction ("download those skills, not invent them").** No package
+  anywhere defines exactly these five names with the user's exact trigger
+  wording — checked `anthropics/skills` (source of this repo's existing
+  `frontend-design`/`webapp-testing`/`web-artifacts-builder`, no SDLC
+  category at all), `sethdford/claude-skills/sdlc` (different names:
+  `definition-of-done`, `release-checklist`, ...), and a GitHub repo/code
+  search for the five names together (no hit). Asked the user to pick a
+  source rather than approximate one; they chose `addyosmani/agent-skills`.
+  Mapped by content fit against the user's own trigger descriptions, not
+  1:1 by category label: `requirements-analysis` ← `spec-driven-development`
+  (not `idea-refine` — its "starting a new project... requirements are
+  unclear, ambiguous, or only exist as a vague idea" is a near-verbatim
+  match for "feature requests or vague product tasks"); `implementation-planning`
+  ← `planning-and-task-breakdown`; `testing-and-verification` ←
+  `test-driven-development` (not `debugging-and-error-recovery` or
+  `browser-testing-with-devtools` — TDD's own trigger, "implementing any
+  logic, fixing any bug, or changing any behavior," matches "triggered by
+  implementation tasks" more directly than either, and it's the
+  ecosystem-agnostic one, matching this harness's own
+  not-specialized-to-one-language scope); `security-review` ←
+  `security-and-hardening`; `release-readiness` ← `shipping-and-launch`.
+  Each downloaded `SKILL.md` was renamed (frontmatter `name:` + directory)
+  to match, required because `Skill._load_agentskills_skill`'s strict-mode
+  validation rejects a frontmatter `name` that doesn't match its parent
+  directory name (confirmed by reading
+  `openhands/sdk/skills/skill.py`/`utils.py` directly, not assumed) — so
+  this isn't optional cosmetic renaming, the skill fails to load without it.
+  Cross-references inside the downloaded content to sibling skills that
+  *are* part of this five (`planning-and-task-breakdown` →
+  `implementation-planning`, `test-driven-development` →
+  `testing-and-verification`) were updated to match; references to sibling
+  skills or `../../references/*.md` files from the source repo that were
+  *not* downloaded (`incremental-implementation`, `context-engineering`,
+  `browser-testing-with-devtools`, `observability-and-instrumentation`,
+  `debugging-and-error-recovery`, `definition-of-done.md`,
+  `security-checklist.md`, `testing-patterns.md`, etc.) were rewritten
+  in-place to stop promising a local file that doesn't exist in this
+  catalog, rather than left as dangling paths or silently deleted — each
+  downloaded `SKILL.md` carries a header comment naming its exact source
+  skill and what was changed. Verified live (no LLM call needed): loaded
+  the full catalog via `load_skill_catalog('skills')` after adding these —
+  all 12 skills (7 pre-existing + 5 new) parse without a
+  `SkillValidationError`.
 - **`run_tests` generalization — chose "detect pytest vs. Node-build" over
   either a no-op or a full test-runner-detection rewrite.** Motivated by a
   live false pass: a Vite/React project with a real JSX parse error in

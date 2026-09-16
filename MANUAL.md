@@ -408,12 +408,29 @@ The one caveat: `SKILL.md`-format AgentSkills directories are only detected
 one level deep (an SDK constraint) — use the flat `.md`-with-frontmatter
 format for anything inside a category subfolder.
 
-This repo ships four example skills to prove the wiring and as a starting
-point: `skills/testing/pytest-conventions.md`, `skills/git/commit-conventions.md`
-(both `KeywordTrigger`), `skills/python-web/fastapi-conventions.md`
-(`KeywordTrigger`), and `skills/python-web/pin-dependencies.md` (`PathTrigger`
-— fires on `pyproject.toml`/`requirements*.txt`, not on task text). Add more
-the same way; no registration step beyond dropping the file in `skills/`.
+This repo ships four example skills (legacy-format) to prove the wiring and
+as a starting point: `skills/testing/pytest-conventions.md`,
+`skills/git/commit-conventions.md` (both `KeywordTrigger`),
+`skills/python-web/fastapi-conventions.md` (`KeywordTrigger`), and
+`skills/python-web/pin-dependencies.md` (`PathTrigger` — fires on
+`pyproject.toml`/`requirements*.txt`, not on task text). Add more the same
+way; no registration step beyond dropping the file in `skills/`.
+
+It also ships five SDLC-lifecycle skills in AgentSkills `SKILL.md` format —
+`skills/requirements-analysis/`, `skills/implementation-planning/`,
+`skills/testing-and-verification/`, `skills/security-review/`, and
+`skills/release-readiness/` — each keyed off its own `description` field
+rather than an explicit `triggers:` list (that's how `SKILL.md`-format
+skills signal relevance; see "Trigger types" above). Downloaded and adapted
+from the MIT-licensed [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills)
+catalog (each `SKILL.md`'s header comment names its original source skill
+and license file), not authored from scratch — they carry that project's own
+engineering conventions (e.g. TDD's red-green-refactor loop, OWASP-based
+threat modeling, staged-rollout thresholds), which won't always match this
+project's own conventions verbatim. Like the other three `SKILL.md`
+directories already in `skills/` (`frontend-design`, `webapp-testing`,
+`web-artifacts-builder`, sourced from `anthropics/skills`), these live one
+level deep under `skills/` per the AgentSkills depth caveat above.
 
 ### Per-project context (`--agents-md` / `agents_md`)
 
