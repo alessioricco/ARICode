@@ -17,7 +17,7 @@ import uuid
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
-from .config import Config, ConfigError, load_config, override_llm
+from .config import Config, ConfigError, load_config, override_llm, resolve_project_dir
 from .runner import run_task, stream_task
 from .skills import write_project_context
 
@@ -92,7 +92,7 @@ def _resolve_cfg(
     if execution is not None:
         cfg = replace(cfg, execution=execution)
     if project is not None:
-        project_dir = os.path.abspath(os.path.join(cfg.projects_dir, project))
+        project_dir = resolve_project_dir(cfg.projects_dir, project)
         os.makedirs(project_dir, exist_ok=True)
         cfg = replace(cfg, workspace=project_dir)
     if agents_md is not None:

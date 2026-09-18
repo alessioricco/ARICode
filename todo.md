@@ -71,24 +71,18 @@ Minimal remediation: a shared-secret header check (e.g.
 no SDK verification needed) gating all task-submission routes, plus a loud
 `MANUAL.md` warning against `--host 0.0.0.0` without one.
 
-### 6. Project path containment and symlink protection
-Project resolution currently joins the caller-provided `project` value to
-`HARNESS_PROJECTS_DIR` via a bare `os.path.join()` in both `cli.py`'s
-`--project` handling and `server.py`'s `project` request field, with no
-check that the resolved path stays inside `HARNESS_PROJECTS_DIR`. Because
-`os.path.join(a, b)` silently discards `a` when `b` is absolute, an
-absolute project value (e.g. `--project /etc/cron.d`, or the same value in
-an unauthenticated `POST /tasks` request) redirects the agent's entire
-workspace — including its terminal and file-editor tools — to an arbitrary
-path on the host; `..` traversal and symlinked project folders open the
-same hole more subtly. This compounds directly with item #5 (server mode
-has no authentication): over the network, this isn't just a local
-misconfiguration risk, it's a remote path-escape primitive. Add one shared
-resolver used by both call sites: reject absolute/traversal project names
-outright, resolve both paths, require
-`project_dir.is_relative_to(projects_root)`, and reject symlink escapes
-before creating or using the directory. Add tests for traversal, absolute
-paths, and symlinks.
+### 6. ~~Project path containment and symlink protection~~ — DONE
+Added `resolve_project_dir(projects_dir, project)` in `config.py`, the one
+shared resolver both `cli.py`'s `--project` and `server.py`'s `project`
+request field now go through: rejects an absolute or `..`-containing
+`project` name outright, then rejects a resolved, symlink-followed
+(`os.path.realpath`) path that falls outside `projects_dir`, raising
+`ConfigError` either way. Verified live (the real bug's exact repro:
+`--project /etc/cron.d`, `../escaped`, and a real on-disk symlink escape
+via `tmp_path` — all rejected; a symlink that stays inside `projects_dir`
+still works). 9 new tests across `test_config.py`/`test_cli.py`/
+`test_server.py`. See `ROADMAP.md` decisions log and `MANUAL.md`
+"Projects: one subfolder per generated project".
 
 ### 7. Reconsider treating `inconclusive` as a nonzero (unsuccessful) exit by default
 `cli.py` deliberately returns exit code `0` for `inconclusive` today — the

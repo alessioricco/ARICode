@@ -129,6 +129,20 @@ def test_create_task_with_project_creates_subfolder(monkeypatch, tmp_path):
     assert (tmp_path / "myapp").is_dir()
 
 
+def test_create_task_rejects_a_project_path_escape_attempt(monkeypatch, tmp_path):
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("stream_task should not be called")
+
+    monkeypatch.setattr(server, "load_config", lambda: _cfg(projects_dir=str(tmp_path)))
+    monkeypatch.setattr(server, "stream_task", _fail_if_called)
+
+    client = TestClient(server.create_app())
+    response = client.post("/tasks", json={"task": "do something", "project": "/etc/cron.d"})
+
+    assert response.status_code == 400
+    assert "must be relative, not absolute" in response.json()["detail"]
+
+
 def test_create_task_agents_md_without_project_returns_400(monkeypatch):
     monkeypatch.setattr(server, "load_config", lambda: _cfg())
 

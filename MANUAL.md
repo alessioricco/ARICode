@@ -378,6 +378,16 @@ agent (`os.path.abspath` in `cli.py`) — this matters because the agent's
 `file_editor` tool requires absolute paths and does not resolve relative ones
 against the workspace itself (see [Known limitations](#known-limitations)).
 
+`NAME` must be a relative path with no `..` segment, and its resolved,
+symlink-followed location must stay inside `HARNESS_PROJECTS_DIR` — both
+`--project` and `POST /tasks`'s `project` field go through the same check
+(`config.py`'s `resolve_project_dir()`) before the directory is created or
+used. An absolute name (`--project /etc/cron.d`), a `..`-traversal attempt,
+or a project name that resolves through an existing symlink to somewhere
+outside `HARNESS_PROJECTS_DIR` is rejected with a clear error instead of
+silently redirecting the agent's entire workspace — including its terminal
+and file-editor tools — to an arbitrary path on the host.
+
 ### README.md
 
 Every task instructs the agent (via `agent.py`'s system-prompt suffix, see
@@ -907,7 +917,12 @@ LLM override set (`--model`/`--api-key`/`--base-url`/`--reasoning-effort`).
 uv run pytest -q
 ```
 
-- `tests/test_config.py` — env parsing, no SDK, no network.
+- `tests/test_config.py` — env parsing, no SDK, no network. Includes
+  `resolve_project_dir()`'s containment checks: a normal name resolves
+  inside `projects_dir`, an absolute name/`..`-traversal/empty-or-dot name
+  is rejected, and a real symlink (created on disk with `tmp_path`, not
+  simulated) that resolves outside `projects_dir` is caught while one that
+  resolves back inside it is allowed.
 - `tests/test_skills.py` — `load_skill_catalog()` (against a temp directory
   with nested subfolders) and `write_project_context()`, no LLM.
 - `tests/custom_tools/test_*.py` — tool executors called directly, no LLM.
@@ -940,12 +955,16 @@ uv run pytest -q
   no real network call), and `_confirm_pending_actions` (only an explicit
   `y`/`yes` approves; `builtins.input` monkeypatched, no real terminal) plus
   confirming `cli.main` only passes it to `run_task` when
-  `confirm_mode == "always"`.
+  `confirm_mode == "always"`, and a regression test confirming `--project
+  ../escaped` is rejected with a configuration error rather than creating
+  a directory outside `HARNESS_PROJECTS_DIR`.
 - `tests/test_server.py` — REST/WebSocket/OpenAI-compatible routes via
   FastAPI's `TestClient` (SSE streaming read via `client.stream(...)` +
   `iter_lines()`); `load_config`/`run_task`/`stream_task` are monkeypatched,
   no LLM. Includes a regression test for the `role == "assistant"` filtering
-  bug (see MANUAL.md "OpenAI-compatible adapter"). Skips cleanly
+  bug (see MANUAL.md "OpenAI-compatible adapter"), and one confirming
+  `POST /tasks`'s `project` field rejects an absolute path with a `400`
+  instead of resolving it. Skips cleanly
   (`pytest.importorskip("fastapi")`) when the `server` extra isn't installed.
 - `tests/test_runner.py` — one real end-to-end smoke test (**skips cleanly**
   when `LLM_MODEL`/`LLM_API_KEY` aren't configured; when they are, it makes

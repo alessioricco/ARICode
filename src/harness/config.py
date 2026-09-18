@@ -16,6 +16,7 @@ import os
 import platform as _platform
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from pathlib import Path
 
 CONFIRM_MODES = ("never", "always")
 EXECUTION_MODES = ("local", "docker")
@@ -244,3 +245,46 @@ def override_llm(
     if reasoning_effort is not None:
         updates["reasoning_effort"] = _clean(reasoning_effort)
     return replace(cfg, **updates) if updates else cfg
+
+
+def resolve_project_dir(projects_dir: str, project: str) -> str:
+    """Resolve a caller-supplied `project` name to a path guaranteed to stay
+    inside `projects_dir` — the one shared resolver `cli.py`'s `--project`
+    and `server.py`'s `project` request field both go through, instead of
+    each doing its own unguarded `os.path.join(projects_dir, project)`.
+
+    That unguarded join was a real bug, not just missing hardening:
+    `os.path.join(a, b)` silently discards `a` when `b` is absolute, so an
+    absolute `project` value (e.g. `--project /etc/cron.d`, or the same
+    value in an unauthenticated `POST /tasks` request) redirected the
+    agent's entire workspace — including its terminal and file-editor tools
+    — to an arbitrary path on the host. `..` traversal had the same effect
+    more subtly.
+
+    Checked in order: `project` itself must be non-empty, relative, and
+    contain no `..` segment (rejected before any path is ever built, so the
+    error names the exact problem rather than a generic "path escaped").
+    The resolved path is then checked against `projects_dir` with symlinks
+    followed on both sides (`os.path.realpath`) — not just a lexical
+    comparison — so a project name that looks safe but resolves through an
+    existing symlink out of `projects_dir` is caught too.
+
+    Raises `ConfigError` — the one error type both callers already catch
+    and turn into a clean CLI/HTTP error — rather than a bespoke exception.
+    """
+    if not project or project in (".", ".."):
+        raise ConfigError(f"Invalid project name: {project!r}")
+    if os.path.isabs(project):
+        raise ConfigError(f"Project name must be relative, not absolute: {project!r}")
+    if any(part == ".." for part in Path(project).parts):
+        raise ConfigError(f"Project name must not contain '..': {project!r}")
+
+    projects_root = os.path.abspath(projects_dir)
+    project_dir = os.path.join(projects_root, project)
+
+    resolved_root = os.path.realpath(projects_root)
+    resolved_project_dir = os.path.realpath(project_dir)
+    if not Path(resolved_project_dir).is_relative_to(Path(resolved_root)):
+        raise ConfigError(f"Project path escapes HARNESS_PROJECTS_DIR: {project!r}")
+
+    return project_dir

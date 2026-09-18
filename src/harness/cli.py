@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 
 from openhands.sdk.event import ActionEvent
 
-from .config import ConfigError, load_config, override_llm
+from .config import ConfigError, load_config, override_llm, resolve_project_dir
 from .runner import run_task
 from .skills import write_project_context
 
@@ -176,7 +176,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.project is not None:
-        project_dir = os.path.abspath(os.path.join(cfg.projects_dir, args.project))
+        try:
+            project_dir = resolve_project_dir(cfg.projects_dir, args.project)
+        except ConfigError as exc:
+            print(f"Configuration error: {exc}", file=sys.stderr)
+            return 1
         os.makedirs(project_dir, exist_ok=True)
         cfg = replace(cfg, workspace=project_dir)
         print(f"Project workspace: {cfg.workspace}")

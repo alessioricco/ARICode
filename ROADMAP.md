@@ -29,6 +29,14 @@ build plan. This file is the living, evolving companion to that static plan.
   MANUAL.md "Switching LLM provider / model" → "Per-request override").
   `reasoning_effort` (from `LLM_REASONING_EFFORT`) is provider-neutral and
   deliberately not validated against a fixed choice list — see decisions log.
+  `resolve_project_dir(projects_dir, project)` is the one shared resolver
+  `cli.py`'s `--project` and `server.py`'s `project` request field both go
+  through (closing a real path-escape bug, not just adding hardening — see
+  "Known limitations" below and decisions log): rejects an absolute or
+  `..`-containing `project` name outright, then rejects a resolved,
+  symlink-followed (`os.path.realpath`) path that falls outside
+  `projects_dir`, raising `ConfigError` either way so both callers keep
+  using the error type they already catch.
 - `llm.py` / `tools.py` / `agent.py` — SDK wiring; default preset tools + `run_tests`.
   `llm.py`'s `build_llm()` only passes `reasoning_effort` to the SDK's `LLM(...)`
   when `cfg.reasoning_effort` is set, so the SDK's own default (`"high"`)
@@ -516,6 +524,49 @@ build plan. This file is the living, evolving companion to that static plan.
 
 ## Decisions log (why, not just what)
 
+- **Project path containment (`resolve_project_dir`): a real security bug,
+  not just missing hardening, fixed with one shared resolver in
+  `config.py` rather than a fix duplicated in `cli.py` and `server.py`.**
+  Both `cli.py`'s `--project` and `server.py`'s `project` request field
+  built the workspace path the same unguarded way:
+  `os.path.abspath(os.path.join(cfg.projects_dir, project))`. Confirmed by
+  reading Python's own `os.path.join` semantics that this is exploitable,
+  not theoretical: `os.path.join(a, b)` silently *discards* `a` when `b`
+  is absolute, so `--project /etc/cron.d` (or the identical field in an
+  unauthenticated `POST /tasks` request — see the server-mode-no-auth
+  item, `todo.md` #5) redirected the agent's entire workspace, including
+  its terminal and file-editor tools, to an arbitrary absolute path on the
+  host. `..` traversal (`--project ../../etc`) had the same effect through
+  ordinary path normalization, no absolute path needed.
+  - **Placed in `config.py`, not a new module.** It's a small (~30-line),
+    single function tightly coupled to `Config.projects_dir` and to
+    `ConfigError` — both callers already import `config.py` and already
+    catch `ConfigError` at every call site that resolves a project
+    (`cli.py`'s existing try/except pattern around `load_config`/
+    `override_llm`; `server.py`'s three `except (ConfigError, ValueError)`
+    blocks around `_resolve_cfg`), so raising `ConfigError` from inside
+    `resolve_project_dir` needed zero new exception-handling wiring at
+    either call site.
+  - **String-level rejection first (absolute path, `..` segment, empty/
+    `.`/`..` name), then a resolved-path containment check
+    (`os.path.realpath` on both sides, `Path.is_relative_to`) as a second,
+    independent layer — not just one or the other.** The string check
+    gives a precise, actionable error message for the obvious attack
+    shapes; the resolved-path check catches what the string check
+    structurally cannot: a project name with no `..` and no absolute
+    component at all (e.g. `myapp`) whose target already exists as a
+    symlink pointing outside `projects_dir`. Verified live with a real
+    symlink created via `tmp_path` in the test suite (not simulated) that
+    the resolved-path check catches this, and that an ordinary symlink
+    which stays *inside* `projects_dir` is correctly still allowed —
+    a symlink itself is not the violation, only one that escapes is.
+  - **Deliberately does not defend against a TOCTOU race** (a symlink
+    swapped in at the validated path between the containment check and
+    `os.makedirs`). Out of scope for this fix: this harness's actual
+    threat model doesn't involve an adversary racing filesystem operations
+    against the same project directory mid-request, and closing that gap
+    properly (e.g. `O_NOFOLLOW`-based directory creation) is disproportionate
+    engineering effort for a risk with no realistic exploitation path here.
 - **`HARNESS_CONFIRM_MODE=always` wiring: a `_run_with_confirmation()`
   wrapper around every `conversation.run()` call, an explicit
   `on_confirm` callback threaded through `stream_task`/`run_task`, and a

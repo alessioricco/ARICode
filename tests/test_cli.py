@@ -195,6 +195,20 @@ def test_project_flag_creates_subfolder_and_overrides_workspace(monkeypatch, tmp
     assert (tmp_path / "myapp").is_dir()
 
 
+def test_project_flag_rejects_a_path_escape_attempt(monkeypatch, tmp_path, capsys):
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("run_task should not be called")
+
+    monkeypatch.setattr(cli, "load_config", lambda: _cfg(projects_dir=str(tmp_path)))
+    monkeypatch.setattr(cli, "run_task", _fail_if_called)
+
+    exit_code = cli.main(["do something", "--project", "../escaped"])
+
+    assert exit_code == 1
+    assert "Configuration error" in capsys.readouterr().err
+    assert not (tmp_path.parent / "escaped").exists()
+
+
 def test_local_execution_runs_task_and_prints_final_message(monkeypatch, capsys):
     calls = {}
 
