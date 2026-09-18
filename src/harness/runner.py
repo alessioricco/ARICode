@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from openhands.sdk import (
@@ -18,7 +18,9 @@ from openhands.sdk import (
     Message,
     TextContent,
 )
-from openhands.sdk.event import ObservationEvent
+from openhands.sdk.conversation import ConversationState
+from openhands.sdk.event import ActionEvent, ObservationEvent
+from openhands.sdk.security.confirmation_policy import AlwaysConfirm
 from openhands.tools.task_tracker import TaskTrackerTool
 
 from .agent import build_agent
@@ -26,7 +28,7 @@ from .config import Config, load_config
 from .custom_tools.run_tests_tool import CheckOutcome, VerificationRun, run_full_verification
 from .workspace import build_workspace
 
-# The eight terminal states a task run can end in. Exactly these because
+# The nine terminal states a task run can end in. Exactly these because
 # they're the ones a caller needs to tell apart to know whether to trust a
 # "done" claim: real, confirmed success; no evidence either way; a confirmed
 # problem that automated retries couldn't fix; a fix attempt that produced
@@ -36,7 +38,10 @@ from .workspace import build_workspace
 # — usually a hang/infinite loop, not a wrong answer); the agent's own
 # task_tracker list still showing unfinished work after automated follow-up
 # (see `_enforce_task_tracker_completion` — distinct from every check above
-# since it's caught before project verification even runs); and a run that
+# since it's caught before project verification even runs); an action that
+# needed HARNESS_CONFIRM_MODE=always approval with no handler available to
+# answer it (see `_run_with_confirmation` — caught before task_tracker or
+# project verification, same reasoning as `incomplete`); and a run that
 # never reached a coherent finish at all. "failed" itself is never a *final*
 # value here — it's the transient signal inside the retry loop between "a
 # check just failed" and "was it fixed, or did retries run out" (see
@@ -52,6 +57,7 @@ VERIFICATION_STATES = (
     "no_progress",
     "timed_out",
     "incomplete",
+    "confirmation_required",
     "stuck",
 )
 
@@ -282,8 +288,113 @@ def _emit_notice(emit: Callable[[Message], None], text: str) -> None:
     emit(Message(role="assistant", content=[TextContent(text=text)]))
 
 
+# A caller-supplied decision function for HARNESS_CONFIRM_MODE=always:
+# given the agent's pending (not-yet-executed) actions, return True to
+# approve them and let the run continue, False to reject them. `cli.py`
+# supplies a real terminal-prompting implementation; server.py supplies
+# none (no terminal to prompt at) — see `_run_with_confirmation` for what
+# happens when no callback is given.
+ConfirmCallback = Callable[[Sequence[ActionEvent]], bool]
+
+_WAITING_FOR_CONFIRMATION = ConversationExecutionStatus.WAITING_FOR_CONFIRMATION
+
+
+def _pending_actions(conversation: Conversation) -> list[ActionEvent]:
+    return ConversationState.get_unmatched_actions(conversation.state.active_branch())
+
+
+def _describe_pending_action(action_event: ActionEvent) -> str:
+    if action_event.action is None:
+        return action_event.tool_name
+    return f"{action_event.tool_name}({action_event.action})"
+
+
+def _confirmation_required_contract(task: str) -> CompletionContract:
+    return CompletionContract(
+        goal=task,
+        acceptance_criteria=["The task described in the original request is implemented."],
+        verification_checks=[],
+        limitations=[
+            (
+                "The agent proposed an action that required confirmation "
+                "(HARNESS_CONFIRM_MODE=always), but no interactive approval "
+                "handler was available to answer it, so the run was stopped "
+                "before task_tracker or project verification could run."
+            )
+        ],
+    )
+
+
+def _run_with_confirmation(
+    conversation: Conversation,
+    cfg: Config,
+    emit: Callable[[Message], None],
+    on_confirm: ConfirmCallback | None,
+) -> bool:
+    """Drive `conversation.run()` to completion, resolving every
+    `AlwaysConfirm` pause along the way instead of leaving it unhandled —
+    the actual wiring `HARNESS_CONFIRM_MODE=always` previously lacked (it
+    was parsed/validated in `config.py` but never attached to a real
+    `ConfirmationPolicyBase`; see ROADMAP.md). A drop-in replacement for a
+    bare `conversation.run()` call: when `cfg.confirm_mode != "always"` it
+    just runs once and returns `True`, identical to the old behavior.
+
+    Returns `True` if the run reached a normal terminal status (finished,
+    stuck, error — anything but an unanswered confirmation). Returns
+    `False` only when the conversation paused for confirmation and no
+    `on_confirm` callback was available to answer it — the caller must
+    treat that as its own terminal outcome (`"confirmation_required"`)
+    rather than proceeding to task_tracker/project verification against a
+    run that never actually continued. Never silently approves (defeats
+    the safety gate `HARNESS_CONFIRM_MODE=always` exists for) or silently
+    loops forever with nobody able to answer.
+
+    Each resumed `.run()` call gets its own fresh `max_iteration_per_run`
+    budget from the SDK — confirmed by reading `local_conversation.py`:
+    `iteration` is a local variable reset to `0` at the top of every
+    `run()` call, not persisted across calls. That's the same "no single
+    shared budget across multiple `conversation.run()` calls" gap the
+    verify/task-tracker retry loops already have (see ROADMAP.md's backlog,
+    "Add a global task execution budget") — a long approve/reject
+    back-and-forth here adds a further call site to that same limitation.
+    The no-handler path below deliberately stops after exactly one
+    rejection rather than looping, so it can't compound that risk; only a
+    real interactive `on_confirm` (bounded by how many actions a human is
+    willing to sit through) drives more than one extra `.run()` call here.
+    """
+    conversation.run()
+    if cfg.confirm_mode != "always":
+        return True
+    while conversation.state.execution_status == _WAITING_FOR_CONFIRMATION:
+        pending = _pending_actions(conversation)
+        if on_confirm is None:
+            summary = "; ".join(_describe_pending_action(a) for a in pending)
+            _emit_notice(
+                emit,
+                "Harness confirm-mode: the agent proposed an action that "
+                f"needs approval ({summary}), but no interactive approval "
+                "handler is available in this context. Stopping rather "
+                "than silently approving it or waiting on confirmations "
+                "nobody can answer.",
+            )
+            conversation.reject_pending_actions(
+                "Harness confirm-mode: no approval handler available; rejected automatically."
+            )
+            return False
+        if on_confirm(pending):
+            conversation.run()
+        else:
+            conversation.reject_pending_actions("Rejected by the user via harness confirm-mode.")
+            conversation.run()
+    return True
+
+
 def _verify_and_report(
-    conversation: Conversation, cfg: Config, emit: Callable[[Message], None], task: str
+    conversation: Conversation,
+    cfg: Config,
+    emit: Callable[[Message], None],
+    task: str,
+    on_confirm: ConfirmCallback | None = None,
 ) -> TaskOutcome:
     """Post-hoc safety net for agent.py's `_VERIFY_BEFORE_FINISH_SUFFIX`: run
     the project's own checks ourselves instead of trusting the agent's
@@ -344,7 +455,14 @@ def _verify_and_report(
         attempts_left -= 1
         retries_used += 1
         conversation.send_message(_verification_followup(run))
-        conversation.run()
+        if not _run_with_confirmation(conversation, cfg, emit, on_confirm):
+            contract = _confirmation_required_contract(task)
+            return TaskOutcome(
+                verification_state="confirmation_required",
+                completion_contract=contract,
+                checks=tuple(run.checks),
+                retries_used=retries_used,
+            )
 
         retry_status = conversation.state.execution_status
         if retry_status in _ABORTED_STATUSES:
@@ -470,7 +588,11 @@ def _task_tracker_completion_contract(task: str, pending: list) -> CompletionCon
 
 
 def _enforce_task_tracker_completion(
-    conversation: Conversation, cfg: Config, emit: Callable[[Message], None], task: str
+    conversation: Conversation,
+    cfg: Config,
+    emit: Callable[[Message], None],
+    task: str,
+    on_confirm: ConfirmCallback | None = None,
 ) -> TaskOutcome | None:
     """Post-hoc safety net for `_AUTONOMOUS_SUFFIX`'s "never leave your own
     task_tracker list incomplete" instruction: inspect the agent's own
@@ -527,7 +649,13 @@ def _enforce_task_tracker_completion(
         attempts_left -= 1
         retries_used += 1
         conversation.send_message(_task_tracker_followup(pending))
-        conversation.run()
+        if not _run_with_confirmation(conversation, cfg, emit, on_confirm):
+            contract = _confirmation_required_contract(task)
+            return TaskOutcome(
+                verification_state="confirmation_required",
+                completion_contract=contract,
+                retries_used=retries_used,
+            )
 
         retry_status = conversation.state.execution_status
         if retry_status in _ABORTED_STATUSES:
@@ -552,13 +680,19 @@ def _enforce_task_tracker_completion(
 
 
 def stream_task(
-    task: str, cfg: Config | None = None, on_message: Callable[[Message], None] | None = None
+    task: str,
+    cfg: Config | None = None,
+    on_message: Callable[[Message], None] | None = None,
+    on_confirm: ConfirmCallback | None = None,
 ) -> TaskOutcome:
     """Run a task, invoking `on_message` with each message as it's produced,
     and return the terminal `TaskOutcome` once verification has settled.
 
     Shared by `run_task` (collects into a list) and the server's WebSocket
-    endpoint (pushes each message to the client as it arrives).
+    endpoint (pushes each message to the client as it arrives). `on_confirm`
+    is only consulted when `cfg.confirm_mode == "always"` (see
+    `_run_with_confirmation`); `cli.py` supplies a real terminal-prompting
+    implementation, `server.py` leaves it unset.
     """
     if cfg is None:
         cfg = load_config()
@@ -579,15 +713,29 @@ def stream_task(
             # conversation.run() and needed this to actually mean something.
             max_iteration_per_run=cfg.max_iterations,
         )
+        if cfg.confirm_mode == "always":
+            # Previously parsed/validated in config.py but never attached to
+            # an actual ConfirmationPolicyBase, so it was a silent no-op —
+            # see ROADMAP.md. AlwaysConfirm pauses before every tool call;
+            # _run_with_confirmation resolves each pause via on_confirm.
+            conversation.set_confirmation_policy(AlwaysConfirm())
         conversation.send_message(task)
-        conversation.run()
-        tracker_outcome = _enforce_task_tracker_completion(conversation, cfg, emit, task)
+        if not _run_with_confirmation(conversation, cfg, emit, on_confirm):
+            contract = _confirmation_required_contract(task)
+            return TaskOutcome(
+                verification_state="confirmation_required", completion_contract=contract
+            )
+        tracker_outcome = _enforce_task_tracker_completion(
+            conversation, cfg, emit, task, on_confirm
+        )
         if tracker_outcome is not None:
             return tracker_outcome
-        return _verify_and_report(conversation, cfg, emit, task)
+        return _verify_and_report(conversation, cfg, emit, task, on_confirm)
 
 
-def run_task(task: str, cfg: Config | None = None) -> TaskResult:
+def run_task(
+    task: str, cfg: Config | None = None, on_confirm: ConfirmCallback | None = None
+) -> TaskResult:
     messages: list = []
-    outcome = stream_task(task, cfg=cfg, on_message=messages.append)
+    outcome = stream_task(task, cfg=cfg, on_message=messages.append, on_confirm=on_confirm)
     return TaskResult(messages, outcome)  # last message is the final assistant output

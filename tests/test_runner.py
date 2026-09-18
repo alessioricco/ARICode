@@ -51,15 +51,15 @@ def test_run_task_creates_a_file(tmp_path, monkeypatch):
 
 
 def _cfg(**overrides) -> Config:
-    base = dict(
-        model="openai/gpt-4o",
-        api_key="key",
-        base_url=None,
-        workspace=".",
-        max_iterations=10,
-        confirm_mode="never",
-        execution="local",
-    )
+    base = {
+        "model": "openai/gpt-4o",
+        "api_key": "key",
+        "base_url": None,
+        "workspace": ".",
+        "max_iterations": 10,
+        "confirm_mode": "never",
+        "execution": "local",
+    }
     base.update(overrides)
     return Config(**base)
 
@@ -148,6 +148,165 @@ def _task_list_event(*items: dict) -> ObservationEvent:
         observation=observation,
         action_id="act_1",
     )
+
+
+class _ConfirmConversation:
+    """Stands in for `Conversation` in `_run_with_confirmation` tests.
+
+    `statuses` is consumed one value per `.run()` call — the status that
+    call leaves the conversation in. `_pending_actions` is monkeypatched
+    separately in these tests rather than reconstructed from real events,
+    since the SDK's own action/observation matching logic isn't what's
+    under test here — only `_run_with_confirmation`'s approve/reject/
+    no-handler control flow is.
+    """
+
+    def __init__(self, statuses: list[ConversationExecutionStatus]) -> None:
+        # Unlike _FakeConversation, _run_with_confirmation always calls
+        # .run() unconditionally as its first action (there's no
+        # already-completed prior run to reflect), so every status in the
+        # list is consumed by a .run() call — none are "pre-run" state.
+        self._statuses = list(statuses)
+        self.state = SimpleNamespace(execution_status=None)
+        self.run_calls = 0
+        self.rejected_reasons: list[str] = []
+        self.confirmation_policies: list[object] = []
+
+    def send_message(self, message: str) -> None:
+        pass
+
+    def run(self) -> None:
+        self.run_calls += 1
+        self.state.execution_status = self._statuses.pop(0)
+
+    def reject_pending_actions(self, reason: str) -> None:
+        self.rejected_reasons.append(reason)
+
+    def set_confirmation_policy(self, policy: object) -> None:
+        self.confirmation_policies.append(policy)
+
+
+_FAKE_PENDING = [SimpleNamespace(tool_name="terminal", action="echo hi")]
+
+
+# --- HARNESS_CONFIRM_MODE=always wiring (_run_with_confirmation) -----------
+
+
+def test_run_with_confirmation_is_a_noop_when_confirm_mode_is_never():
+    conversation = _ConfirmConversation([ConversationExecutionStatus.FINISHED])
+
+    result = runner._run_with_confirmation(
+        conversation, _cfg(confirm_mode="never"), lambda _m: None, on_confirm=None
+    )
+
+    assert result is True
+    assert conversation.run_calls == 1
+    assert conversation.rejected_reasons == []
+
+
+def test_run_with_confirmation_approves_and_continues(monkeypatch):
+    monkeypatch.setattr(runner, "_pending_actions", lambda _conv: _FAKE_PENDING)
+    conversation = _ConfirmConversation(
+        [
+            ConversationExecutionStatus.WAITING_FOR_CONFIRMATION,
+            ConversationExecutionStatus.FINISHED,
+        ]
+    )
+    seen = []
+
+    def _approve(pending):
+        seen.append(list(pending))
+        return True
+
+    result = runner._run_with_confirmation(
+        conversation, _cfg(confirm_mode="always"), lambda _m: None, on_confirm=_approve
+    )
+
+    assert result is True
+    assert conversation.run_calls == 2
+    assert seen == [_FAKE_PENDING]
+    assert conversation.rejected_reasons == []
+
+
+def test_run_with_confirmation_rejects_then_continues(monkeypatch):
+    monkeypatch.setattr(runner, "_pending_actions", lambda _conv: _FAKE_PENDING)
+    conversation = _ConfirmConversation(
+        [
+            ConversationExecutionStatus.WAITING_FOR_CONFIRMATION,
+            ConversationExecutionStatus.FINISHED,
+        ]
+    )
+
+    result = runner._run_with_confirmation(
+        conversation, _cfg(confirm_mode="always"), lambda _m: None, on_confirm=lambda _p: False
+    )
+
+    assert result is True
+    assert conversation.run_calls == 2
+    assert conversation.rejected_reasons == ["Rejected by the user via harness confirm-mode."]
+
+
+def test_run_with_confirmation_stops_and_rejects_once_when_no_handler(monkeypatch):
+    # No on_confirm callback available (e.g. server mode) — must not
+    # silently approve (defeats the safety gate) or loop forever with
+    # nobody able to answer.
+    monkeypatch.setattr(runner, "_pending_actions", lambda _conv: _FAKE_PENDING)
+    conversation = _ConfirmConversation([ConversationExecutionStatus.WAITING_FOR_CONFIRMATION])
+    emitted = []
+
+    result = runner._run_with_confirmation(
+        conversation, _cfg(confirm_mode="always"), emitted.append, on_confirm=None
+    )
+
+    assert result is False
+    assert conversation.run_calls == 1  # no further run() calls after the unanswered pause
+    assert len(conversation.rejected_reasons) == 1
+    assert len(emitted) == 1
+    assert "no interactive approval" in emitted[0].content[0].text
+
+
+def test_stream_task_sets_always_confirm_policy_when_confirm_mode_always(monkeypatch):
+    conversation = _ConfirmConversation([ConversationExecutionStatus.FINISHED])
+    monkeypatch.setattr(runner, "Conversation", lambda **_kwargs: conversation)
+    monkeypatch.setattr(runner, "build_agent", lambda cfg: "fake-agent")
+    monkeypatch.setattr(runner, "build_workspace", lambda cfg: nullcontext("fake-workspace"))
+    monkeypatch.setattr(runner, "_enforce_task_tracker_completion", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        runner,
+        "_verify_and_report",
+        lambda *a, **kw: runner.TaskOutcome(
+            verification_state="inconclusive",
+            completion_contract=runner.CompletionContract(
+                goal="", acceptance_criteria=[], verification_checks=[], limitations=[]
+            ),
+        ),
+    )
+
+    runner.stream_task("do the thing", cfg=_cfg(confirm_mode="always"))
+
+    assert len(conversation.confirmation_policies) == 1
+    from openhands.sdk.security.confirmation_policy import AlwaysConfirm
+
+    assert isinstance(conversation.confirmation_policies[0], AlwaysConfirm)
+
+
+def test_stream_task_short_circuits_when_confirmation_required_with_no_handler(monkeypatch):
+    monkeypatch.setattr(runner, "_pending_actions", lambda _conv: _FAKE_PENDING)
+    conversation = _ConfirmConversation([ConversationExecutionStatus.WAITING_FOR_CONFIRMATION])
+    monkeypatch.setattr(runner, "Conversation", lambda **_kwargs: conversation)
+    monkeypatch.setattr(runner, "build_agent", lambda cfg: "fake-agent")
+    monkeypatch.setattr(runner, "build_workspace", lambda cfg: nullcontext("fake-workspace"))
+    tracker_calls = {"count": 0}
+    monkeypatch.setattr(
+        runner,
+        "_enforce_task_tracker_completion",
+        lambda *a, **kw: tracker_calls.__setitem__("count", tracker_calls["count"] + 1),
+    )
+
+    outcome = runner.stream_task("do the thing", cfg=_cfg(confirm_mode="always"))
+
+    assert outcome.verification_state == "confirmation_required"
+    assert tracker_calls["count"] == 0  # never reached task_tracker enforcement
 
 
 # --- verify_tests=never: verification is skipped entirely ------------------

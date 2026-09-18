@@ -71,7 +71,7 @@ template with every variable documented inline.
 | `LLM_REASONING_EFFORT` | *(empty — SDK default `high` applies)* | Provider-neutral reasoning effort, passed straight through to the SDK's `LLM.reasoning_effort` (LiteLLM translates it per-provider). Common values: `none` \| `minimal` \| `low` \| `medium` \| `high` \| `xhigh` \| `max` — not validated against a fixed list, since the SDK accepts forward-compatible provider values too. |
 | `HARNESS_WORKSPACE` | `.` | Working directory the agent operates in when `--project` is not used. |
 | `HARNESS_MAX_ITERATIONS` | `50` | Safety cap on the agent loop. |
-| `HARNESS_CONFIRM_MODE` | `never` | `never` \| `always` (pause before each tool call — policy not yet wired to an actual confirmation gate; see `agent.py`). |
+| `HARNESS_CONFIRM_MODE` | `never` | `never` \| `always` (pause before each tool call for approval — see [Confirmation mode](#confirmation-mode)). |
 | `HARNESS_EXECUTION` | `local` | `local` \| `docker` — see [Execution modes](#execution-modes). |
 | `HARNESS_PROJECTS_DIR` | `./projects` | Root folder for generated projects; `--project NAME` resolves to `HARNESS_PROJECTS_DIR/NAME`. |
 | `HARNESS_SKILLS_DIR` | `./skills` | Shared skill catalog loaded into every agent's `AgentContext` — see [Skills](#skills). |
@@ -809,7 +809,7 @@ against all three: after every run, `runner.py` first checks the agent's own
 project's own verification itself — via `run_tests_tool.run_full_verification()`,
 no LLM call involved (see [Custom tools](#custom-tools) for exactly what that
 checks, in any of Python/Node/Go/Rust/Java). The result is always one of
-seven states, exposed as `verification_state` everywhere a result reaches a
+eight states, exposed as `verification_state` everywhere a result reaches a
 caller (CLI stdout, `GET /tasks/{id}`, the `WS /tasks/stream` `"result"`
 event — see [CLI reference](#cli-reference) / [Server mode](#server-mode-httpwebsocket)):
 
@@ -821,9 +821,10 @@ event — see [CLI reference](#cli-reference) / [Server mode](#server-mode-httpw
 | `no_progress` | A fix attempt was sent back to the agent, but the *very next* verification pass came back with the exact same failing check, same exit code, and the same output (only a run-duration footer, like pytest's `in 3.85s`, is allowed to differ) — meaning that specific attempt provably changed nothing observable. Stops immediately, before exhausting the rest of the retry budget, rather than spending it on further attempts already shown not to help. Confirmed live: an agent edited a comparison operator to "fix" a failing test twice in a row while its own explanatory messages degraded into fluent-sounding but empty prose (see ROADMAP.md's decisions log) — both edits were no-ops for that specific failure (a different code branch handled it), and pytest's output was identical before and after. This is a cheaper, more reliable signal than trying to judge whether the agent's own reasoning text still makes sense — it doesn't read the agent's prose at all, only the verification output. |
 | `timed_out` | A check exceeded its timeout (300s) and was killed — retried the same as a real failure (usually an infinite loop or a hang the agent introduced, worth one more attempt to fix), but kept as its own terminal state rather than folded into `retry_exhausted` if it's still timing out after the retry budget: a persistent hang is a different problem from a wrong answer, worth telling apart at a glance. (Two identical timeouts in a row are `no_progress`, not this — same rule as any other check.) |
 | `incomplete` | The agent's own `task_tracker` list still had an item marked `todo`/`in_progress` after `HARNESS_MAX_VERIFY_RETRIES` automated follow-ups — see "Task-tracker completion" below. Project verification is skipped entirely in this case: a task the agent's own tracking says isn't finished can't be meaningfully "verified" by running its tests. |
-| `stuck` | The conversation's own `execution_status` (the SDK's stuck-loop/error detection) ended in `stuck` or `error` rather than a normal finish — verification isn't even attempted against a run that never reached a coherent stopping point. Checked before the initial verification pass and again after every retry, and before/during the task-tracker check too. |
+| `confirmation_required` | `HARNESS_CONFIRM_MODE=always` paused before a tool call, but no interactive approval handler was available to answer it (e.g. server mode, or any caller that didn't supply one) — see [Confirmation mode](#confirmation-mode) below. The harness rejects the pending action once and stops rather than silently approving it or waiting indefinitely; task_tracker and project verification are both skipped, since the run never actually continued. |
+| `stuck` | The conversation's own `execution_status` (the SDK's stuck-loop/error detection) ended in `stuck` or `error` rather than a normal finish — verification isn't even attempted against a run that never reached a coherent stopping point. Checked before the initial verification pass and again after every retry, and before/during the task-tracker and confirmation checks too. |
 
-(An eighth value, `failed`, exists only as the momentary signal inside the
+(A ninth value, `failed`, exists only as the momentary signal inside the
 retry loop between "a check just failed" and "was it fixed, or did retries
 run out" — it never appears as a run's final `verification_state`.)
 
@@ -868,6 +869,38 @@ always `inconclusive` in that case (with a limitation noting verification
 was skipped), never `verified` — skipping the check is not the same as
 confirming the work.
 
+## Confirmation mode
+
+`HARNESS_CONFIRM_MODE=always` pauses the agent before every tool call and
+requires explicit approval before it runs — the SDK's `AlwaysConfirm`
+confirmation policy, attached in `runner.py`. In the CLI, this means an
+interactive prompt at the terminal:
+
+```
+--- Confirmation required (HARNESS_CONFIRM_MODE=always) ---
+  terminal: command='rm -rf build/' is_input=False timeout=None reset=False kind='TerminalAction'
+Approve? [y/N]
+```
+
+Anything other than an explicit `y`/`yes` rejects the action — the agent
+sees the rejection and can try something else or explain why it's stuck,
+the same as if a human had said "no, don't do that." Approving lets exactly
+that one action run; the agent is paused again before its next tool call.
+
+**Server mode has no way to answer this prompt** (there's no terminal to
+read from), so if `HARNESS_CONFIRM_MODE=always` is set and the agent
+proposes any tool call, the harness rejects that one action automatically
+and stops the task immediately with `verification_state:
+"confirmation_required"` — it does not silently approve the action (that
+would defeat the whole point of confirm mode) and does not hang waiting for
+an answer nobody can give. In practice, `HARNESS_CONFIRM_MODE=always` is a
+CLI-only feature today; leave it at the default `never` for server-mode
+deployments.
+
+`--confirm-mode` is not a CLI flag — this is purely a `.env`/`HARNESS_CONFIRM_MODE`
+setting, consistent with `confirm_mode` not being part of the per-request
+LLM override set (`--model`/`--api-key`/`--base-url`/`--reasoning-effort`).
+
 ## Testing
 
 ```bash
@@ -904,7 +937,10 @@ uv run pytest -q
 - `tests/test_cli.py` — argument parsing and control flow; `load_config`/
   `run_task` are monkeypatched, no LLM, no Docker. Includes
   `resolve_task_source()` (literal/file/URL, with `urlopen` monkeypatched —
-  no real network call).
+  no real network call), and `_confirm_pending_actions` (only an explicit
+  `y`/`yes` approves; `builtins.input` monkeypatched, no real terminal) plus
+  confirming `cli.main` only passes it to `run_task` when
+  `confirm_mode == "always"`.
 - `tests/test_server.py` — REST/WebSocket/OpenAI-compatible routes via
   FastAPI's `TestClient` (SSE streaming read via `client.stream(...)` +
   `iter_lines()`); `load_config`/`run_task`/`stream_task` are monkeypatched,
@@ -938,7 +974,16 @@ uv run pytest -q
   short-circuits project verification entirely (it's never even attempted)
   — using real `ObservationEvent`/`TaskTrackerObservation` instances, not
   bare mocks, so the `isinstance` check `_task_tracker_snapshot` relies on
-  is actually exercised.
+  is actually exercised. Also covers `_run_with_confirmation` (no LLM):
+  a no-op when `confirm_mode != "always"`, approving and rejecting a
+  pending action and continuing either way, stopping and rejecting exactly
+  once when no `on_confirm` handler is available, `stream_task` actually
+  attaching `AlwaysConfirm` when `confirm_mode == "always"`, and a
+  `stream_task`-level integration test confirming an unanswered
+  confirmation short-circuits task_tracker/project verification entirely.
+  Confirmed live (both the approve and reject paths) via the real CLI
+  against an isolated workspace, piping `y`/`n` into
+  `_confirm_pending_actions`'s `input()` prompt.
 
 ## Known limitations
 
@@ -1015,10 +1060,6 @@ uv run pytest -q
   code, but this is a soft prompt-level instruction, not a hard guarantee.
   Install `tmux` locally with `brew install tmux` (macOS) / `apt-get install
   tmux` (Linux) for terminal stability generally.
-- **`HARNESS_CONFIRM_MODE=always`** is parsed and validated but not yet wired
-  to an actual confirmation gate in `agent.py` — the SDK's confirmation
-  policy API hasn't been verified against this SDK version yet
-  (`/verify-sdk` first).
 - **Only `local` and `docker` execution exist.** ECS/EC2 (mentioned as a
   future direction) are not implemented; `workspace.py` is structured so
   adding one is additive, not a rewrite.

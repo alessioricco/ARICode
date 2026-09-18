@@ -82,7 +82,25 @@ build plan. This file is the living, evolving companion to that static plan.
   (an incomplete task list means completion was never established, so
   running tests to "verify" it would be building on a false premise). See
   "Decisions log" below for why this reads live conversation events rather
-  than the tool's persisted `TASKS.json`.
+  than the tool's persisted `TASKS.json`. Also wires
+  `HARNESS_CONFIRM_MODE=always` to an actual `AlwaysConfirm` confirmation
+  policy (`conversation.set_confirmation_policy(...)`) — previously
+  parsed/validated in `config.py` but never attached to anything, a silent
+  no-op (see "Known limitations" below). `_run_with_confirmation()` wraps
+  every `conversation.run()` call in `runner.py` (the initial run, and
+  both retry loops') and drives the SDK's approve/reject mechanics
+  (`conversation.run()` again to approve, `reject_pending_actions()` +
+  `run()` to reject — both confirmed live, not assumed, by reading
+  `local_conversation.py`'s own `run()` loop): given an `on_confirm`
+  callback, it consults it per pending action; given none (server mode, or
+  any caller that didn't supply one), it rejects the action once and stops
+  rather than silently approving it or hanging — surfaced as a new
+  `"confirmation_required"` terminal `verification_state` that
+  short-circuits task_tracker/project verification entirely. `cli.py`
+  supplies a real terminal `input()`-based handler
+  (`_confirm_pending_actions`) only when `cfg.confirm_mode == "always"`;
+  `server.py` supplies none. See MANUAL.md "Confirmation mode" and
+  "Decisions log" below.
 - `custom_tools/run_tests_tool.py` — a language-neutral verification
   pipeline in four explicit, independently-tested stages: **project
   detection** (`detect_project()`, one marker-file walk covering Python/
@@ -158,10 +176,6 @@ build plan. This file is the living, evolving companion to that static plan.
 - **ECS/EC2 execution backends** — `workspace.py`'s `build_workspace()` is the
   single dispatch point; adding one is a new branch there plus a new
   `HARNESS_EXECUTION` value, not a rewrite. Nothing beyond `docker` exists.
-- **`HARNESS_CONFIRM_MODE=always` wiring** — parsed/validated but not
-  connected to an actual pause-before-tool-call gate. Needs `/verify-sdk` on
-  the SDK's confirmation-policy API first (explicitly called out as
-  unverified in `CLAUDE.md`).
 - **`run_tests`/verification generalization — now covers six languages,
   still not fully generic.** Was Python(pytest)/Node(`npm run build`)-only;
   now detects and verifies Python, Node, Go, Rust, and Java
@@ -502,6 +516,70 @@ build plan. This file is the living, evolving companion to that static plan.
 
 ## Decisions log (why, not just what)
 
+- **`HARNESS_CONFIRM_MODE=always` wiring: a `_run_with_confirmation()`
+  wrapper around every `conversation.run()` call, an explicit
+  `on_confirm` callback threaded through `stream_task`/`run_task`, and a
+  new `"confirmation_required"` terminal state for the no-handler case —
+  not a silent auto-approve and not a CLI-only special case.** This item
+  had been deferred since it was first identified specifically because it
+  needed `/verify-sdk` first — done here by reading
+  `openhands/sdk/security/confirmation_policy.py` and
+  `local_conversation.py`'s `run()` loop directly, then confirming the
+  actual mechanics live (not just from source): `AlwaysConfirm` pauses
+  before every tool call (`execution_status` becomes
+  `WAITING_FOR_CONFIRMATION`); `ConversationState.get_unmatched_actions
+  (conversation.state.active_branch())` returns the pending `ActionEvent`s;
+  calling `conversation.run()` again approves and executes them;
+  `conversation.reject_pending_actions(reason)` rejects them (status drops
+  to `IDLE`) and a further `run()` lets the agent react to the rejection.
+  Reproduced both paths against a real conversation before writing any
+  harness code.
+  - **Wrapped every `conversation.run()` call site, not just the initial
+    one.** `runner.py` already had three: the initial run, and one each
+    inside `_verify_and_report`'s and `_enforce_task_tracker_completion`'s
+    retry loops. All three can trigger a fresh confirmation pause (the
+    agent might propose a risky action while trying to fix a failing
+    test, not only on its very first move), so `_run_with_confirmation()`
+    replaces the raw call at all three sites rather than only guarding the
+    first one and leaving the retry loops to break on an unhandled
+    `WAITING_FOR_CONFIRMATION` status.
+  - **No `on_confirm` handler present (e.g. server mode) rejects the
+    pending action exactly once and stops, rather than silently
+    approving it or looping.** Silently approving would defeat the entire
+    point of `HARNESS_CONFIRM_MODE=always` — a user who set it explicitly
+    asked for a real gate, not a no-op with different wiring. Looping
+    (re-checking forever, hoping someone eventually answers) has no
+    natural end condition since nothing is polling for an answer.
+    Rejecting once and returning a new terminal state
+    (`"confirmation_required"`) matches the existing `"stuck"` precedent
+    in this file: an explicit, visible "this needs manual attention,"
+    not a run that silently vanishes or hangs.
+  - **A dedicated `"confirmation_required"` state, not folded into
+    `"stuck"`.** The conversation didn't get stuck or error in the SDK's
+    own sense — the run stopped because of a harness-level policy
+    decision (no one available to answer), a different and more specific
+    cause worth telling apart, matching this file's established pattern
+    of one state per distinct cause (see the `incomplete`/`no_progress`/
+    `timed_out` entries above).
+  - **`cli.py` supplies a real terminal handler
+    (`_confirm_pending_actions`, `input()`-based, rejecting on anything
+    other than an explicit `y`/`yes`), `server.py` supplies none** —
+    consistent with this being, in practice, a CLI-only feature (there is
+    no terminal to prompt at in server mode); a server deployment that
+    sets `HARNESS_CONFIRM_MODE=always` will see every task immediately
+    end in `confirmation_required` on its first tool call, which is
+    documented in MANUAL.md as the expected (if not very useful) behavior
+    rather than an unexplained failure.
+  - **Known, accepted limitation, not fixed here:** each resumed
+    `conversation.run()` call gets its own fresh `max_iteration_per_run`
+    budget from the SDK (confirmed by reading `local_conversation.py`:
+    `iteration` is a local variable reset to `0` every call). A long
+    interactive approve/reject session adds a further call site to the
+    same "no single shared budget across multiple `run()` calls" gap the
+    verify/task-tracker retry loops already have — see `todo.md`'s "Add a
+    global task execution budget" item. Not addressed in this change; the
+    no-handler path stops after exactly one rejection specifically so it
+    can't compound that risk on its own.
 - **Harness-side `task_tracker`-completion enforcement: read live
   conversation events directly, not the tool's `TASKS.json` persistence
   file — and a new `"incomplete"` `verification_state` that short-circuits

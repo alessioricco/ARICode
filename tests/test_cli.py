@@ -26,15 +26,15 @@ def _fake_result(messages=(), verification_state="verified", limitations=()):
 
 
 def _cfg(**overrides) -> Config:
-    base = dict(
-        model="openai/gpt-4o",
-        api_key="key",
-        base_url=None,
-        workspace=".",
-        max_iterations=10,
-        confirm_mode="never",
-        execution="local",
-    )
+    base = {
+        "model": "openai/gpt-4o",
+        "api_key": "key",
+        "base_url": None,
+        "workspace": ".",
+        "max_iterations": 10,
+        "confirm_mode": "never",
+        "execution": "local",
+    }
     base.update(overrides)
     return Config(**base)
 
@@ -107,7 +107,7 @@ def test_main_reads_task_from_file(monkeypatch, tmp_path, capsys):
     task_file.write_text("Create HELLO.txt with the line: hi.")
     calls = {}
 
-    def _fake_run_task(task, cfg=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None):
         calls["task"] = task
         return _fake_result([_FakeMessage("done")])
 
@@ -151,7 +151,7 @@ def test_config_error_is_reported_and_exits_nonzero(monkeypatch, capsys):
 def test_docker_execution_is_passed_through_to_run_task(monkeypatch):
     calls = {}
 
-    def _fake_run_task(task, cfg=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None):
         calls["cfg"] = cfg
         return _fake_result()
 
@@ -165,7 +165,7 @@ def test_docker_execution_is_passed_through_to_run_task(monkeypatch):
 
 
 def test_run_task_error_is_reported_and_exits_nonzero(monkeypatch, capsys):
-    def _fake_run_task(task, cfg=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None):
         raise RuntimeError("HARNESS_EXECUTION=docker requires the 'sandbox' extra")
 
     monkeypatch.setattr(cli, "load_config", lambda: _cfg())
@@ -180,7 +180,7 @@ def test_run_task_error_is_reported_and_exits_nonzero(monkeypatch, capsys):
 def test_project_flag_creates_subfolder_and_overrides_workspace(monkeypatch, tmp_path):
     calls = {}
 
-    def _fake_run_task(task, cfg=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None):
         calls["cfg"] = cfg
         return _fake_result()
 
@@ -198,7 +198,7 @@ def test_project_flag_creates_subfolder_and_overrides_workspace(monkeypatch, tmp
 def test_local_execution_runs_task_and_prints_final_message(monkeypatch, capsys):
     calls = {}
 
-    def _fake_run_task(task, cfg=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None):
         calls["task"] = task
         calls["cfg"] = cfg
         return _fake_result([_FakeMessage("all done")])
@@ -228,7 +228,7 @@ def test_agents_md_without_project_is_rejected(monkeypatch, capsys):
 
 
 def test_agents_md_with_project_writes_file(monkeypatch, tmp_path):
-    def _fake_run_task(task, cfg=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None):
         return _fake_result()
 
     monkeypatch.setattr(cli, "load_config", lambda: _cfg(projects_dir=str(tmp_path)))
@@ -245,7 +245,7 @@ def test_agents_md_with_project_writes_file(monkeypatch, tmp_path):
 def test_model_flag_overrides_llm_model_without_touching_env(monkeypatch):
     calls = {}
 
-    def _fake_run_task(task, cfg=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None):
         calls["cfg"] = cfg
         return _fake_result()
 
@@ -263,7 +263,7 @@ def test_model_flag_overrides_llm_model_without_touching_env(monkeypatch):
 def test_api_key_and_base_url_flags_override_config(monkeypatch):
     calls = {}
 
-    def _fake_run_task(task, cfg=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None):
         calls["cfg"] = cfg
         return _fake_result()
 
@@ -288,7 +288,7 @@ def test_api_key_and_base_url_flags_override_config(monkeypatch):
 def test_no_llm_override_flags_leaves_config_untouched(monkeypatch):
     calls = {}
 
-    def _fake_run_task(task, cfg=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None):
         calls["cfg"] = cfg
         return _fake_result()
 
@@ -305,7 +305,7 @@ def test_no_llm_override_flags_leaves_config_untouched(monkeypatch):
 def test_reasoning_effort_flag_overrides_config(monkeypatch):
     calls = {}
 
-    def _fake_run_task(task, cfg=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None):
         calls["cfg"] = cfg
         return _fake_result()
 
@@ -334,7 +334,7 @@ def test_blank_model_override_reports_config_error(monkeypatch, capsys):
 
 
 def test_prints_verification_state_and_exits_zero_when_verified(monkeypatch, capsys):
-    def _fake_run_task(task, cfg=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None):
         return _fake_result([_FakeMessage("all done")], verification_state="verified")
 
     monkeypatch.setattr(cli, "load_config", lambda: _cfg())
@@ -347,7 +347,7 @@ def test_prints_verification_state_and_exits_zero_when_verified(monkeypatch, cap
 
 
 def test_exits_nonzero_when_verification_retries_are_exhausted(monkeypatch, capsys):
-    def _fake_run_task(task, cfg=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None):
         return _fake_result(
             [_FakeMessage("I gave up")],
             verification_state="retry_exhausted",
@@ -366,7 +366,7 @@ def test_exits_nonzero_when_verification_retries_are_exhausted(monkeypatch, caps
 
 
 def test_exits_nonzero_when_verification_keeps_timing_out(monkeypatch, capsys):
-    def _fake_run_task(task, cfg=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None):
         return _fake_result(
             [_FakeMessage("still going")],
             verification_state="timed_out",
@@ -384,7 +384,7 @@ def test_exits_nonzero_when_verification_keeps_timing_out(monkeypatch, capsys):
 
 
 def test_exits_nonzero_when_a_fix_attempt_made_no_progress(monkeypatch, capsys):
-    def _fake_run_task(task, cfg=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None):
         return _fake_result([_FakeMessage("tried a fix")], verification_state="no_progress")
 
     monkeypatch.setattr(cli, "load_config", lambda: _cfg())
@@ -398,7 +398,7 @@ def test_exits_nonzero_when_a_fix_attempt_made_no_progress(monkeypatch, capsys):
 
 
 def test_exits_nonzero_when_task_tracker_left_incomplete(monkeypatch, capsys):
-    def _fake_run_task(task, cfg=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None):
         return _fake_result(
             [_FakeMessage("finished")],
             verification_state="incomplete",
@@ -416,7 +416,7 @@ def test_exits_nonzero_when_task_tracker_left_incomplete(monkeypatch, capsys):
 
 
 def test_exits_nonzero_when_agent_got_stuck(monkeypatch, capsys):
-    def _fake_run_task(task, cfg=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None):
         return _fake_result([], verification_state="stuck")
 
     monkeypatch.setattr(cli, "load_config", lambda: _cfg())
@@ -431,7 +431,7 @@ def test_exits_nonzero_when_agent_got_stuck(monkeypatch, capsys):
 def test_inconclusive_verification_still_exits_zero_but_is_visible(monkeypatch, capsys):
     # Inconclusive isn't an error (nothing was proven broken), but it must
     # not look like a silent, confirmed success either.
-    def _fake_run_task(task, cfg=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None):
         return _fake_result(
             [_FakeMessage("done, probably")],
             verification_state="inconclusive",
@@ -452,7 +452,7 @@ def test_inconclusive_verification_still_exits_zero_but_is_visible(monkeypatch, 
 def test_execution_flag_overrides_configured_docker_default(monkeypatch):
     calls = {}
 
-    def _fake_run_task(task, cfg=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None):
         calls["cfg"] = cfg
         return _fake_result()
 
@@ -463,3 +463,70 @@ def test_execution_flag_overrides_configured_docker_default(monkeypatch):
 
     assert exit_code == 0
     assert calls["cfg"].execution == "local"
+
+
+# --- HARNESS_CONFIRM_MODE=always wiring -------------------------------------
+
+
+def test_exits_nonzero_when_confirmation_required_with_no_handler(monkeypatch, capsys):
+    def _fake_run_task(task, cfg=None, on_confirm=None):
+        return _fake_result(
+            [_FakeMessage("stopped")],
+            verification_state="confirmation_required",
+            limitations=["The agent proposed an action that required confirmation"],
+        )
+
+    monkeypatch.setattr(cli, "load_config", lambda: _cfg())
+    monkeypatch.setattr(cli, "run_task", _fake_run_task)
+
+    exit_code = cli.main(["do something"])
+
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "Verification: confirmation_required" in out
+
+
+def test_confirm_mode_never_passes_no_confirm_handler_to_run_task(monkeypatch):
+    calls = {}
+
+    def _fake_run_task(task, cfg=None, on_confirm=None):
+        calls["on_confirm"] = on_confirm
+        return _fake_result()
+
+    monkeypatch.setattr(cli, "load_config", lambda: _cfg(confirm_mode="never"))
+    monkeypatch.setattr(cli, "run_task", _fake_run_task)
+
+    cli.main(["do something"])
+
+    assert calls["on_confirm"] is None
+
+
+def test_confirm_mode_always_passes_the_interactive_handler_to_run_task(monkeypatch):
+    calls = {}
+
+    def _fake_run_task(task, cfg=None, on_confirm=None):
+        calls["on_confirm"] = on_confirm
+        return _fake_result()
+
+    monkeypatch.setattr(cli, "load_config", lambda: _cfg(confirm_mode="always"))
+    monkeypatch.setattr(cli, "run_task", _fake_run_task)
+
+    cli.main(["do something"])
+
+    assert calls["on_confirm"] is cli._confirm_pending_actions
+
+
+def test_confirm_pending_actions_approves_only_on_explicit_yes(monkeypatch):
+    from types import SimpleNamespace
+
+    pending = [SimpleNamespace(tool_name="terminal", action="rm -rf /tmp/x")]
+
+    monkeypatch.setattr("builtins.input", lambda _prompt: "y")
+    assert cli._confirm_pending_actions(pending) is True
+
+    monkeypatch.setattr("builtins.input", lambda _prompt: "yes")
+    assert cli._confirm_pending_actions(pending) is True
+
+    for reply in ("n", "no", "", "sure", "YOLO"):
+        monkeypatch.setattr("builtins.input", lambda _prompt, reply=reply: reply)
+        assert cli._confirm_pending_actions(pending) is False

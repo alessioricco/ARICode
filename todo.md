@@ -21,13 +21,17 @@ Pinned both to `==1.47.0` (the version already verified throughout
 (`uv pip install -e ".[dev]"`) and full suite re-run (240 passed). See
 `ROADMAP.md` decisions log for the full rationale.
 
-### 2. `HARNESS_CONFIRM_MODE=always` — wire the pause-before-tool-call gate
-Parsed and validated in `config.py` but never connected to an actual
-confirmation policy (`ROADMAP.md` backlog). This is a named acceptance
-surface in `docs/SPEC.md` section 8 ("Confirmation: `HARNESS_CONFIRM_MODE=always`
-attaches a policy that pauses before each tool call") that currently does
-nothing — a user who sets it gets silent no-op safety, not the safety they
-asked for. Needs `/verify-sdk` on the SDK's confirmation-policy API first.
+### 2. ~~`HARNESS_CONFIRM_MODE=always` — wire the pause-before-tool-call gate~~ — DONE
+Verified the SDK's confirmation-policy API live (`AlwaysConfirm`,
+`get_unmatched_actions`, `reject_pending_actions`) before wiring it. Added
+`_run_with_confirmation()` in `runner.py`, wrapping all three
+`conversation.run()` call sites; `cli.py` supplies a real terminal
+approve/reject prompt. A pending action with no available handler (e.g.
+server mode) rejects once and reports a new `"confirmation_required"`
+state rather than silently approving or hanging. Confirmed live via the
+real CLI, both approve and reject paths, in an isolated workspace with
+zero effect on this repo. See `ROADMAP.md` decisions log and `MANUAL.md`
+"Confirmation mode".
 
 ### 3. ~~Harness-side `task_tracker`-completion enforcement~~ — DONE
 Added `_enforce_task_tracker_completion()` (`runner.py`), which runs right

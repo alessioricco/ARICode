@@ -7,8 +7,11 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from collections.abc import Sequence
 from dataclasses import replace
 from urllib.parse import urlparse
+
+from openhands.sdk.event import ActionEvent
 
 from .config import ConfigError, load_config, override_llm
 from .runner import run_task
@@ -20,6 +23,19 @@ _URL_FETCH_TIMEOUT_SECONDS = 15
 def _looks_like_url(value: str) -> bool:
     parsed = urlparse(value)
     return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+
+
+def _confirm_pending_actions(pending: Sequence[ActionEvent]) -> bool:
+    """Interactive terminal handler for `HARNESS_CONFIRM_MODE=always`:
+    prints each pending action and asks the user to approve or reject it.
+    Any answer other than an explicit yes rejects — the safer default for
+    a prompt nobody may be watching closely.
+    """
+    print("\n--- Confirmation required (HARNESS_CONFIRM_MODE=always) ---")
+    for action in pending:
+        print(f"  {action.tool_name}: {action.action}")
+    answer = input("Approve? [y/N] ").strip().lower()
+    return answer in ("y", "yes")
 
 
 def resolve_task_source(value: str) -> str:
@@ -168,8 +184,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.agents_md is not None:
         write_project_context(cfg.workspace, args.agents_md)
 
+    on_confirm = _confirm_pending_actions if cfg.confirm_mode == "always" else None
     try:
-        messages = run_task(task, cfg=cfg)
+        messages = run_task(task, cfg=cfg, on_confirm=on_confirm)
     except Exception as exc:  # noqa: BLE001 - surfaced as a clean CLI error, not a traceback
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -185,9 +202,10 @@ def main(argv: list[str] | None = None) -> int:
     # runner.py's TaskOutcome / MANUAL.md "Test verification". A task whose
     # verification failed and couldn't be fixed, made no observable progress
     # on a fix attempt, kept timing out, whose own task_tracker list was
-    # left incomplete, or whose run never reached a coherent finish, is a
-    # nonzero exit; "inconclusive" (nothing runnable to check) is not an
-    # error but is still printed so it isn't mistaken for a confirmed pass.
+    # left incomplete, needed a confirm-mode approval nobody could answer, or
+    # whose run never reached a coherent finish, is a nonzero exit;
+    # "inconclusive" (nothing runnable to check) is not an error but is still
+    # printed so it isn't mistaken for a confirmed pass.
     outcome = messages.outcome
     print(f"\nVerification: {outcome.verification_state}")
     for note in outcome.completion_contract.limitations:
@@ -197,6 +215,7 @@ def main(argv: list[str] | None = None) -> int:
         "no_progress",
         "timed_out",
         "incomplete",
+        "confirmation_required",
         "stuck",
     ):
         return 1
