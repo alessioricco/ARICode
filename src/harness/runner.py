@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
@@ -28,7 +29,7 @@ from .config import Config, load_config
 from .custom_tools.run_tests_tool import CheckOutcome, VerificationRun, run_full_verification
 from .workspace import build_workspace
 
-# The nine terminal states a task run can end in. Exactly these because
+# The ten terminal states a task run can end in. Exactly these because
 # they're the ones a caller needs to tell apart to know whether to trust a
 # "done" claim: real, confirmed success; no evidence either way; a confirmed
 # problem that automated retries couldn't fix; a fix attempt that produced
@@ -41,14 +42,18 @@ from .workspace import build_workspace
 # since it's caught before project verification even runs); an action that
 # needed HARNESS_CONFIRM_MODE=always approval with no handler available to
 # answer it (see `_run_with_confirmation` — caught before task_tracker or
-# project verification, same reasoning as `incomplete`); and a run that
-# never reached a coherent finish at all. "failed" itself is never a *final*
-# value here — it's the transient signal inside the retry loop between "a
-# check just failed" and "was it fixed, or did retries run out" (see
-# `_verify_and_report`); it's listed because `VerificationRun.state`
-# (run_tests_tool.py) uses the same vocabulary and a caller may inspect a
-# `TaskOutcome.checks` mid-analysis. See MANUAL.md "Test verification" and
-# ROADMAP.md's decisions log.
+# project verification, same reasoning as `incomplete`); the shared,
+# task-level wall-clock budget (`HARNESS_MAX_TASK_SECONDS`) running out
+# across the initial run and every retry phase combined — distinct from a
+# single `conversation.run()` call hitting its own `max_iteration_per_run`
+# (which resets on every call and so cannot bound a whole task on its own,
+# see ROADMAP.md's decisions log); and a run that never reached a coherent
+# finish at all. "failed" itself is never a *final* value here — it's the
+# transient signal inside the retry loop between "a check just failed" and
+# "was it fixed, or did retries run out" (see `_verify_and_report`); it's
+# listed because `VerificationRun.state` (run_tests_tool.py) uses the same
+# vocabulary and a caller may inspect a `TaskOutcome.checks` mid-analysis.
+# See MANUAL.md "Test verification" and ROADMAP.md's decisions log.
 VERIFICATION_STATES = (
     "verified",
     "failed",
@@ -58,6 +63,7 @@ VERIFICATION_STATES = (
     "timed_out",
     "incomplete",
     "confirmation_required",
+    "budget_exhausted",
     "stuck",
 )
 
@@ -325,46 +331,109 @@ def _confirmation_required_contract(task: str) -> CompletionContract:
     )
 
 
+def _budget_exhausted_contract(task: str, cfg: Config) -> CompletionContract:
+    return CompletionContract(
+        goal=task,
+        acceptance_criteria=["The task described in the original request is implemented."],
+        verification_checks=[],
+        limitations=[
+            (
+                "The task's shared wall-clock budget "
+                f"(HARNESS_MAX_TASK_SECONDS={cfg.max_task_seconds}) ran out before "
+                "the task reached a normal finish, so its own completion claim, if "
+                "any, was not verified."
+            )
+        ],
+    )
+
+
+# _run_with_confirmation's outcome for one call: "ok" means the run reached
+# a normal terminal status (finished, stuck, error — anything but an
+# unanswered confirmation or an exhausted budget); the other two values are
+# each their own terminal TaskOutcome.verification_state at the call site.
+_RUN_OK = "ok"
+_RUN_CONFIRMATION_REQUIRED = "confirmation_required"
+_RUN_BUDGET_EXHAUSTED = "budget_exhausted"
+
+
+def _outcome_for_run_result(
+    result: str,
+    task: str,
+    cfg: Config,
+    *,
+    checks: tuple[CheckOutcome, ...] = (),
+    retries_used: int = 0,
+) -> TaskOutcome | None:
+    """Build the terminal `TaskOutcome` for a non-`"ok"` `_run_with_confirmation`
+    result (`"confirmation_required"` or `"budget_exhausted"`), or `None` if
+    `result == "ok"` — the caller's signal to proceed normally instead of
+    returning early. Shared by all three call sites so each doesn't repeat
+    its own contract-selection branch.
+    """
+    if result == _RUN_OK:
+        return None
+    contract = (
+        _confirmation_required_contract(task)
+        if result == _RUN_CONFIRMATION_REQUIRED
+        else _budget_exhausted_contract(task, cfg)
+    )
+    return TaskOutcome(
+        verification_state=result,
+        completion_contract=contract,
+        checks=checks,
+        retries_used=retries_used,
+    )
+
+
 def _run_with_confirmation(
     conversation: Conversation,
     cfg: Config,
     emit: Callable[[Message], None],
     on_confirm: ConfirmCallback | None,
-) -> bool:
+    deadline: float = float("inf"),
+) -> str:
     """Drive `conversation.run()` to completion, resolving every
     `AlwaysConfirm` pause along the way instead of leaving it unhandled —
     the actual wiring `HARNESS_CONFIRM_MODE=always` previously lacked (it
     was parsed/validated in `config.py` but never attached to a real
-    `ConfirmationPolicyBase`; see ROADMAP.md). A drop-in replacement for a
-    bare `conversation.run()` call: when `cfg.confirm_mode != "always"` it
-    just runs once and returns `True`, identical to the old behavior.
+    `ConfirmationPolicyBase`; see ROADMAP.md) — and enforcing the shared,
+    task-level `HARNESS_MAX_TASK_SECONDS` wall-clock budget before every
+    single `.run()` call it makes, not just the first. A drop-in
+    replacement for a bare `conversation.run()` call: when
+    `cfg.confirm_mode != "always"` and the budget isn't exhausted, it just
+    runs once and returns `"ok"`, identical to the old behavior.
 
-    Returns `True` if the run reached a normal terminal status (finished,
-    stuck, error — anything but an unanswered confirmation). Returns
-    `False` only when the conversation paused for confirmation and no
-    `on_confirm` callback was available to answer it — the caller must
-    treat that as its own terminal outcome (`"confirmation_required"`)
-    rather than proceeding to task_tracker/project verification against a
-    run that never actually continued. Never silently approves (defeats
-    the safety gate `HARNESS_CONFIRM_MODE=always` exists for) or silently
-    loops forever with nobody able to answer.
+    Returns `"ok"` if the run reached a normal terminal status.  Returns
+    `"confirmation_required"` only when the conversation paused for
+    confirmation and no `on_confirm` callback was available to answer it.
+    Returns `"budget_exhausted"` only when `deadline` (an absolute
+    `time.monotonic()` timestamp — see `stream_task`) had already passed
+    before a `.run()` call was allowed to start. Either non-`"ok"` value
+    means the caller must treat it as its own terminal outcome rather than
+    proceeding to task_tracker/project verification against a run that
+    never actually continued (or never started another retry). Never
+    silently approves a pending action (defeats the safety gate
+    `HARNESS_CONFIRM_MODE=always` exists for), never silently lets a run
+    keep going past its budget, and never loops forever with nobody able
+    to answer a confirmation.
 
-    Each resumed `.run()` call gets its own fresh `max_iteration_per_run`
-    budget from the SDK — confirmed by reading `local_conversation.py`:
-    `iteration` is a local variable reset to `0` at the top of every
-    `run()` call, not persisted across calls. That's the same "no single
-    shared budget across multiple `conversation.run()` calls" gap the
-    verify/task-tracker retry loops already have (see ROADMAP.md's backlog,
-    "Add a global task execution budget") — a long approve/reject
-    back-and-forth here adds a further call site to that same limitation.
-    The no-handler path below deliberately stops after exactly one
-    rejection rather than looping, so it can't compound that risk; only a
-    real interactive `on_confirm` (bounded by how many actions a human is
-    willing to sit through) drives more than one extra `.run()` call here.
+    `deadline` closes a real gap: each resumed `.run()` call gets its own
+    fresh `max_iteration_per_run` budget from the SDK — confirmed by
+    reading `local_conversation.py`: `iteration` is a local variable reset
+    to `0` at the top of every `run()` call, not persisted across calls —
+    so `HARNESS_MAX_ITERATIONS` alone cannot bound how long one task runs
+    in total across the initial run and every retry phase combined (see
+    ROADMAP.md's decisions log for the exact multiplication and why a
+    wall-clock budget was chosen over reverse-engineering the SDK's
+    internal per-call iteration count). Checking it before *every* `.run()`
+    call this function makes — including each confirm/reject round-trip —
+    means a long approve/reject back-and-forth can't exceed it either.
     """
+    if time.monotonic() >= deadline:
+        return _RUN_BUDGET_EXHAUSTED
     conversation.run()
     if cfg.confirm_mode != "always":
-        return True
+        return _RUN_OK
     while conversation.state.execution_status == _WAITING_FOR_CONFIRMATION:
         pending = _pending_actions(conversation)
         if on_confirm is None:
@@ -380,13 +449,21 @@ def _run_with_confirmation(
             conversation.reject_pending_actions(
                 "Harness confirm-mode: no approval handler available; rejected automatically."
             )
-            return False
+            return _RUN_CONFIRMATION_REQUIRED
+        if time.monotonic() >= deadline:
+            _emit_notice(
+                emit,
+                "Harness: the task's shared wall-clock budget "
+                f"(HARNESS_MAX_TASK_SECONDS={cfg.max_task_seconds}) ran out while "
+                "waiting on a confirm-mode approval. Stopping.",
+            )
+            return _RUN_BUDGET_EXHAUSTED
         if on_confirm(pending):
             conversation.run()
         else:
             conversation.reject_pending_actions("Rejected by the user via harness confirm-mode.")
             conversation.run()
-    return True
+    return _RUN_OK
 
 
 def _verify_and_report(
@@ -395,6 +472,7 @@ def _verify_and_report(
     emit: Callable[[Message], None],
     task: str,
     on_confirm: ConfirmCallback | None = None,
+    deadline: float = float("inf"),
 ) -> TaskOutcome:
     """Post-hoc safety net for agent.py's `_VERIFY_BEFORE_FINISH_SUFFIX`: run
     the project's own checks ourselves instead of trusting the agent's
@@ -407,6 +485,12 @@ def _verify_and_report(
     `cfg.max_verify_retries` so a project whose checks are simply wrong, or a
     bug the model can't fix, doesn't loop forever.
     """
+    if time.monotonic() >= deadline:
+        return TaskOutcome(
+            verification_state="budget_exhausted",
+            completion_contract=_budget_exhausted_contract(task, cfg),
+        )
+
     status = conversation.state.execution_status
     if status in _ABORTED_STATUSES:
         contract = _build_completion_contract(task, None, skipped=False, aborted=True)
@@ -455,14 +539,12 @@ def _verify_and_report(
         attempts_left -= 1
         retries_used += 1
         conversation.send_message(_verification_followup(run))
-        if not _run_with_confirmation(conversation, cfg, emit, on_confirm):
-            contract = _confirmation_required_contract(task)
-            return TaskOutcome(
-                verification_state="confirmation_required",
-                completion_contract=contract,
-                checks=tuple(run.checks),
-                retries_used=retries_used,
-            )
+        run_result = _run_with_confirmation(conversation, cfg, emit, on_confirm, deadline)
+        outcome = _outcome_for_run_result(
+            run_result, task, cfg, checks=tuple(run.checks), retries_used=retries_used
+        )
+        if outcome is not None:
+            return outcome
 
         retry_status = conversation.state.execution_status
         if retry_status in _ABORTED_STATUSES:
@@ -593,6 +675,7 @@ def _enforce_task_tracker_completion(
     emit: Callable[[Message], None],
     task: str,
     on_confirm: ConfirmCallback | None = None,
+    deadline: float = float("inf"),
 ) -> TaskOutcome | None:
     """Post-hoc safety net for `_AUTONOMOUS_SUFFIX`'s "never leave your own
     task_tracker list incomplete" instruction: inspect the agent's own
@@ -603,13 +686,20 @@ def _enforce_task_tracker_completion(
     Returns `None` when there's nothing to enforce (the tool was never
     used, or its last known state already has no pending items) so
     `stream_task` proceeds to `_verify_and_report`; returns a terminal
-    `TaskOutcome` only if the agent gets stuck/errors mid-retry or the
-    retry budget is exhausted with items still pending. Reuses
-    `cfg.max_verify_retries` as the retry budget — the same "how many
-    automatic fix-then-recheck cycles are we willing to spend" question
-    `_verify_and_report` already answers for test failures, not a second,
-    near-duplicate config knob for this closely related concern.
+    `TaskOutcome` only if the agent gets stuck/errors mid-retry, the shared
+    task-level budget (`deadline`) runs out, or the retry budget is
+    exhausted with items still pending. Reuses `cfg.max_verify_retries` as
+    the retry budget — the same "how many automatic fix-then-recheck
+    cycles are we willing to spend" question `_verify_and_report` already
+    answers for test failures, not a second, near-duplicate config knob
+    for this closely related concern.
     """
+    if time.monotonic() >= deadline:
+        return TaskOutcome(
+            verification_state="budget_exhausted",
+            completion_contract=_budget_exhausted_contract(task, cfg),
+        )
+
     status = conversation.state.execution_status
     if status in _ABORTED_STATUSES:
         contract = _build_completion_contract(task, None, skipped=False, aborted=True)
@@ -649,13 +739,10 @@ def _enforce_task_tracker_completion(
         attempts_left -= 1
         retries_used += 1
         conversation.send_message(_task_tracker_followup(pending))
-        if not _run_with_confirmation(conversation, cfg, emit, on_confirm):
-            contract = _confirmation_required_contract(task)
-            return TaskOutcome(
-                verification_state="confirmation_required",
-                completion_contract=contract,
-                retries_used=retries_used,
-            )
+        run_result = _run_with_confirmation(conversation, cfg, emit, on_confirm, deadline)
+        outcome = _outcome_for_run_result(run_result, task, cfg, retries_used=retries_used)
+        if outcome is not None:
+            return outcome
 
         retry_status = conversation.state.execution_status
         if retry_status in _ABORTED_STATUSES:
@@ -719,18 +806,25 @@ def stream_task(
             # see ROADMAP.md. AlwaysConfirm pauses before every tool call;
             # _run_with_confirmation resolves each pause via on_confirm.
             conversation.set_confirmation_policy(AlwaysConfirm())
+        # A shared, task-level wall-clock budget spanning every phase below —
+        # HARNESS_MAX_ITERATIONS alone only bounds a single conversation.run()
+        # call, and runner.py can call that up to three times per task (this
+        # initial run, then up to max_verify_retries more in each of the two
+        # retry loops below), each getting its own fresh iteration budget
+        # from the SDK. See _run_with_confirmation's docstring and
+        # ROADMAP.md's decisions log for the exact multiplication this closes.
+        deadline = time.monotonic() + cfg.max_task_seconds
         conversation.send_message(task)
-        if not _run_with_confirmation(conversation, cfg, emit, on_confirm):
-            contract = _confirmation_required_contract(task)
-            return TaskOutcome(
-                verification_state="confirmation_required", completion_contract=contract
-            )
+        run_result = _run_with_confirmation(conversation, cfg, emit, on_confirm, deadline)
+        outcome = _outcome_for_run_result(run_result, task, cfg)
+        if outcome is not None:
+            return outcome
         tracker_outcome = _enforce_task_tracker_completion(
-            conversation, cfg, emit, task, on_confirm
+            conversation, cfg, emit, task, on_confirm, deadline
         )
         if tracker_outcome is not None:
             return tracker_outcome
-        return _verify_and_report(conversation, cfg, emit, task, on_confirm)
+        return _verify_and_report(conversation, cfg, emit, task, on_confirm, deadline)
 
 
 def run_task(

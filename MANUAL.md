@@ -79,6 +79,7 @@ template with every variable documented inline.
 | `HARNESS_DOCKER_PLATFORM` | auto-detected from host arch | `linux/amd64` \| `linux/arm64`. Leave blank to auto-detect (arm64 on Apple Silicon, amd64 otherwise). |
 | `HARNESS_VERIFY_TESTS` | `always` | `always` \| `never` — after the agent finishes, re-run the project's own tests and, if they fail, send the real failure back and let the agent retry. See [Test verification](#test-verification). |
 | `HARNESS_MAX_VERIFY_RETRIES` | `2` | How many automated fix-and-retry cycles `HARNESS_VERIFY_TESTS=always` allows before giving up. |
+| `HARNESS_MAX_TASK_SECONDS` | `1800` | Shared wall-clock budget (seconds) for one whole task — the initial run plus every task_tracker/verification retry combined, not just a single `conversation.run()` call. See [Task budget](#task-budget). |
 
 ## CLI reference
 
@@ -127,8 +128,9 @@ The agent's final message is printed to stdout, followed by a
 [Test verification](#test-verification) for what each state means. Exit code
 is `1` on a configuration error, a run-time error (printed to stderr as
 `Configuration error: ...` / `Error: ...` — not a raw traceback), or a
-`retry_exhausted`/`no_progress`/`timed_out`/`incomplete`/`confirmation_required`/`stuck`
-verification outcome; `0` for `verified` and `inconclusive` (the latter
+`retry_exhausted`/`no_progress`/`timed_out`/`incomplete`/`confirmation_required`/
+`budget_exhausted`/`stuck` verification outcome; `0` for `verified` and
+`inconclusive` (the latter
 isn't an error by default — nothing was proven broken — but it's still
 printed so it isn't mistaken for a confirmed pass; pass
 `--require-verification` to make it nonzero too).
@@ -267,7 +269,7 @@ once `status == "completed"`; `error` is set once `status == "failed"`.
 exception — it is not proof the work is correct.** Check
 `verification_state` for that: one of `"verified"`, `"inconclusive"`,
 `"retry_exhausted"`, `"no_progress"`, `"timed_out"`, `"incomplete"`,
-`"confirmation_required"`, or `"stuck"` (see [Test
+`"confirmation_required"`, `"budget_exhausted"`, or `"stuck"` (see [Test
 verification](#test-verification) for what each means and when it's set),
 populated once `status` reaches `"completed"` (or `"failed"` — see
 `require_verification` below). `completion_contract` is the structured
@@ -850,7 +852,7 @@ against all three: after every run, `runner.py` first checks the agent's own
 project's own verification itself — via `run_tests_tool.run_full_verification()`,
 no LLM call involved (see [Custom tools](#custom-tools) for exactly what that
 checks, in any of Python/Node/Go/Rust/Java). The result is always one of
-eight states, exposed as `verification_state` everywhere a result reaches a
+nine states, exposed as `verification_state` everywhere a result reaches a
 caller (CLI stdout, `GET /tasks/{id}`, the `WS /tasks/stream` `"result"`
 event — see [CLI reference](#cli-reference) / [Server mode](#server-mode-httpwebsocket)):
 
@@ -863,9 +865,10 @@ event — see [CLI reference](#cli-reference) / [Server mode](#server-mode-httpw
 | `timed_out` | A check exceeded its timeout (300s) and was killed — retried the same as a real failure (usually an infinite loop or a hang the agent introduced, worth one more attempt to fix), but kept as its own terminal state rather than folded into `retry_exhausted` if it's still timing out after the retry budget: a persistent hang is a different problem from a wrong answer, worth telling apart at a glance. (Two identical timeouts in a row are `no_progress`, not this — same rule as any other check.) |
 | `incomplete` | The agent's own `task_tracker` list still had an item marked `todo`/`in_progress` after `HARNESS_MAX_VERIFY_RETRIES` automated follow-ups — see "Task-tracker completion" below. Project verification is skipped entirely in this case: a task the agent's own tracking says isn't finished can't be meaningfully "verified" by running its tests. |
 | `confirmation_required` | `HARNESS_CONFIRM_MODE=always` paused before a tool call, but no interactive approval handler was available to answer it (e.g. server mode, or any caller that didn't supply one) — see [Confirmation mode](#confirmation-mode) below. The harness rejects the pending action once and stops rather than silently approving it or waiting indefinitely; task_tracker and project verification are both skipped, since the run never actually continued. |
-| `stuck` | The conversation's own `execution_status` (the SDK's stuck-loop/error detection) ended in `stuck` or `error` rather than a normal finish — verification isn't even attempted against a run that never reached a coherent stopping point. Checked before the initial verification pass and again after every retry, and before/during the task-tracker and confirmation checks too. |
+| `budget_exhausted` | The task's shared, wall-clock `HARNESS_MAX_TASK_SECONDS` budget ran out — spanning the initial run and every task_tracker/verification retry combined, not just one `conversation.run()` call. See [Task budget](#task-budget) below. |
+| `stuck` | The conversation's own `execution_status` (the SDK's stuck-loop/error detection) ended in `stuck` or `error` rather than a normal finish — verification isn't even attempted against a run that never reached a coherent stopping point. Checked before the initial verification pass and again after every retry, and before/during the task-tracker, confirmation, and budget checks too. |
 
-(A ninth value, `failed`, exists only as the momentary signal inside the
+(A tenth value, `failed`, exists only as the momentary signal inside the
 retry loop between "a check just failed" and "was it fixed, or did retries
 run out" — it never appears as a run's final `verification_state`.)
 
@@ -942,6 +945,38 @@ deployments.
 setting, consistent with `confirm_mode` not being part of the per-request
 LLM override set (`--model`/`--api-key`/`--base-url`/`--reasoning-effort`).
 
+## Task budget
+
+`HARNESS_MAX_ITERATIONS` bounds a single `conversation.run()` call, but
+`runner.py` can call `.run()` up to three times for one task: the initial
+run, then up to `HARNESS_MAX_VERIFY_RETRIES` more inside
+`_enforce_task_tracker_completion`'s retry loop, then up to
+`HARNESS_MAX_VERIFY_RETRIES` more again inside `_verify_and_report`'s retry
+loop — and each call gets its own fresh iteration budget from the SDK, not
+a shared one. Worst case, a single task could spend roughly
+`HARNESS_MAX_ITERATIONS × (1 + 2 × HARNESS_MAX_VERIFY_RETRIES)` iterations,
+well beyond what the configured cap on its own suggests.
+
+`HARNESS_MAX_TASK_SECONDS` (default `1800`, i.e. 30 minutes) closes that
+gap with a shared, task-level wall-clock budget spanning every phase
+combined — not a replacement for `HARNESS_MAX_ITERATIONS` (kept as a
+secondary, per-call guard), a complementary one. It's checked before every
+single `conversation.run()` call the harness makes for a task, including
+each confirm-mode approve/reject round-trip — not just once at the start —
+so a long back-and-forth can't exceed it either. When it runs out, the
+task stops immediately with `verification_state: "budget_exhausted"`,
+regardless of which phase it was in; task_tracker and project verification
+are both skipped if the budget ran out before reaching them, the same way
+`"confirmation_required"` short-circuits them.
+
+This is a wall-clock budget, not a hard interrupt mid-`conversation.run()`
+call — a check only happens *between* calls, the same checkpoint-based
+model `HARNESS_MAX_VERIFY_RETRIES` already uses. A single very slow
+iteration (a huge context, a slow LLM response) can still push the actual
+elapsed time somewhat past the configured value before the next checkpoint
+catches it; this bounds runaway *retry multiplication*, not sub-second
+precision timing.
+
 ## Testing
 
 ```bash
@@ -953,7 +988,9 @@ uv run pytest -q
   inside `projects_dir`, an absolute name/`..`-traversal/empty-or-dot name
   is rejected, and a real symlink (created on disk with `tmp_path`, not
   simulated) that resolves outside `projects_dir` is caught while one that
-  resolves back inside it is allowed.
+  resolves back inside it is allowed. Also covers `HARNESS_MAX_TASK_SECONDS`
+  parsing (default, a custom value, and rejecting non-positive/non-integer
+  values).
 - `tests/test_skills.py` — `load_skill_catalog()` (against a temp directory
   with nested subfolders) and `write_project_context()`, no LLM.
 - `tests/custom_tools/test_*.py` — tool executors called directly, no LLM.
@@ -988,10 +1025,12 @@ uv run pytest -q
   confirming `cli.main` only passes it to `run_task` when
   `confirm_mode == "always"`, a regression test confirming `--project
   ../escaped` is rejected with a configuration error rather than creating
-  a directory outside `HARNESS_PROJECTS_DIR`, and `--require-verification`
+  a directory outside `HARNESS_PROJECTS_DIR`, `--require-verification`
   (default off, an unknown project type/missing tool/no-tests-collected
   case all become exit `1` when passed, other verification states and the
-  default-off case are unaffected).
+  default-off case are unaffected), and a regression test confirming
+  `budget_exhausted` is a nonzero exit (verified live: reverting the fix
+  makes this test fail with `assert 0 == 1`).
 - `tests/test_server.py` — REST/WebSocket/OpenAI-compatible routes via
   FastAPI's `TestClient` (SSE streaming read via `client.stream(...)` +
   `iter_lines()`); `load_config`/`run_task`/`stream_task` are monkeypatched,
@@ -1041,7 +1080,18 @@ uv run pytest -q
   confirmation short-circuits task_tracker/project verification entirely.
   Confirmed live (both the approve and reject paths) via the real CLI
   against an isolated workspace, piping `y`/`n` into
-  `_confirm_pending_actions`'s `input()` prompt.
+  `_confirm_pending_actions`'s `input()` prompt. `HARNESS_MAX_TASK_SECONDS`
+  coverage: `_run_with_confirmation` reports `budget_exhausted` before its
+  first `.run()` call when the deadline has already passed, and again mid
+  confirm-loop (a mocked, increasing `time.monotonic()` sequence simulates
+  time passing between checks); `_verify_and_report` and
+  `_enforce_task_tracker_completion` each report it both at entry and
+  mid-retry; and a `stream_task`-level integration test confirms an
+  already-exhausted budget short-circuits task_tracker/project verification
+  entirely. Confirmed live via the real CLI (`HARNESS_MAX_TASK_SECONDS=1`
+  against a trivial task) that the task still completes its work but is
+  correctly reported as `budget_exhausted` with exit code `1`, and that a
+  normal task under the default budget is unaffected.
 
 ## Known limitations
 

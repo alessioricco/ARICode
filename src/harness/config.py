@@ -31,6 +31,7 @@ DEFAULT_PROJECTS_DIR = "./projects"
 DEFAULT_SKILLS_DIR = "./skills"
 DEFAULT_VERIFY_TESTS = "always"
 DEFAULT_MAX_VERIFY_RETRIES = 2
+DEFAULT_MAX_TASK_SECONDS = 1800
 DEFAULT_DOCKER_IMAGE = "coding-agent-harness/agent-server:local"
 DEFAULT_DOCKER_PLATFORM = (
     "linux/arm64" if _platform.machine().lower() in ("arm64", "aarch64") else "linux/amd64"
@@ -77,6 +78,14 @@ class Config:
     # report, which live testing showed can be wrong (see ROADMAP.md).
     verify_tests: str = DEFAULT_VERIFY_TESTS  # one of VERIFY_TESTS_MODES
     max_verify_retries: int = DEFAULT_MAX_VERIFY_RETRIES
+
+    # A shared, task-level wall-clock budget spanning every phase of one task
+    # — the initial conversation.run(), and all of _enforce_task_tracker_
+    # completion's and _verify_and_report's retries — not just the SDK's own
+    # max_iteration_per_run, which resets on every single run() call and so
+    # cannot on its own bound how long one task can run in total (see
+    # runner.py's _run_with_confirmation and ROADMAP.md's decisions log).
+    max_task_seconds: int = DEFAULT_MAX_TASK_SECONDS
 
     # Provider-neutral reasoning effort, consumed by llm.py and passed
     # straight through to the SDK's own `LLM.reasoning_effort` (LiteLLM
@@ -194,6 +203,11 @@ def load_config(env: Mapping[str, str] | None = None, *, dotenv_path: str = ".en
         default=DEFAULT_MAX_VERIFY_RETRIES,
         name="HARNESS_MAX_VERIFY_RETRIES",
     )
+    max_task_seconds = _parse_positive_int(
+        env.get("HARNESS_MAX_TASK_SECONDS"),
+        default=DEFAULT_MAX_TASK_SECONDS,
+        name="HARNESS_MAX_TASK_SECONDS",
+    )
 
     return Config(
         model=model,
@@ -209,6 +223,7 @@ def load_config(env: Mapping[str, str] | None = None, *, dotenv_path: str = ".en
         docker_platform=docker_platform,
         verify_tests=verify_tests,
         max_verify_retries=max_verify_retries,
+        max_task_seconds=max_task_seconds,
         reasoning_effort=reasoning_effort,
     )
 

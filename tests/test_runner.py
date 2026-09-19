@@ -199,7 +199,7 @@ def test_run_with_confirmation_is_a_noop_when_confirm_mode_is_never():
         conversation, _cfg(confirm_mode="never"), lambda _m: None, on_confirm=None
     )
 
-    assert result is True
+    assert result == "ok"
     assert conversation.run_calls == 1
     assert conversation.rejected_reasons == []
 
@@ -222,7 +222,7 @@ def test_run_with_confirmation_approves_and_continues(monkeypatch):
         conversation, _cfg(confirm_mode="always"), lambda _m: None, on_confirm=_approve
     )
 
-    assert result is True
+    assert result == "ok"
     assert conversation.run_calls == 2
     assert seen == [_FAKE_PENDING]
     assert conversation.rejected_reasons == []
@@ -241,7 +241,7 @@ def test_run_with_confirmation_rejects_then_continues(monkeypatch):
         conversation, _cfg(confirm_mode="always"), lambda _m: None, on_confirm=lambda _p: False
     )
 
-    assert result is True
+    assert result == "ok"
     assert conversation.run_calls == 2
     assert conversation.rejected_reasons == ["Rejected by the user via harness confirm-mode."]
 
@@ -258,7 +258,7 @@ def test_run_with_confirmation_stops_and_rejects_once_when_no_handler(monkeypatc
         conversation, _cfg(confirm_mode="always"), emitted.append, on_confirm=None
     )
 
-    assert result is False
+    assert result == "confirmation_required"
     assert conversation.run_calls == 1  # no further run() calls after the unanswered pause
     assert len(conversation.rejected_reasons) == 1
     assert len(emitted) == 1
@@ -306,6 +306,156 @@ def test_stream_task_short_circuits_when_confirmation_required_with_no_handler(m
     outcome = runner.stream_task("do the thing", cfg=_cfg(confirm_mode="always"))
 
     assert outcome.verification_state == "confirmation_required"
+    assert tracker_calls["count"] == 0  # never reached task_tracker enforcement
+
+
+# --- HARNESS_MAX_TASK_SECONDS: shared task-level budget ---------------------
+#
+# Regression coverage for the gap logged in ROADMAP.md: HARNESS_MAX_ITERATIONS
+# only bounds a single conversation.run() call, but runner.py can call
+# .run() up to three times per task (the initial run, then up to
+# max_verify_retries more in each of the two retry loops), each getting its
+# own fresh iteration budget from the SDK — so a task could spend roughly
+# max_iterations * (1 + 2 * max_verify_retries) iterations, well beyond what
+# the configured cap suggests. `deadline` (an absolute time.monotonic()
+# timestamp) is checked before every conversation.run() call these tests
+# exercise.
+
+
+def test_run_with_confirmation_reports_budget_exhausted_before_any_run_call():
+    conversation = _ConfirmConversation([ConversationExecutionStatus.FINISHED])
+
+    result = runner._run_with_confirmation(
+        conversation, _cfg(confirm_mode="never"), lambda _m: None, on_confirm=None, deadline=-1.0
+    )
+
+    assert result == "budget_exhausted"
+    assert conversation.run_calls == 0  # never even attempted the run
+
+
+def test_run_with_confirmation_reports_budget_exhausted_mid_confirm_loop(monkeypatch):
+    # The deadline passes *between* two confirm-mode round-trips, not before
+    # the very first .run() call — must still be caught, not just checked
+    # once at the top. First time.monotonic() call is the pre-run check
+    # (still within budget); the second is inside the confirm loop, after
+    # the initial run already paused for confirmation (budget now exhausted).
+    monkeypatch.setattr(runner, "_pending_actions", lambda _conv: _FAKE_PENDING)
+    conversation = _ConfirmConversation([ConversationExecutionStatus.WAITING_FOR_CONFIRMATION])
+    clock = iter([0.0, 100.0])
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(clock))
+
+    result = runner._run_with_confirmation(
+        conversation,
+        _cfg(confirm_mode="always"),
+        lambda _m: None,
+        on_confirm=lambda _p: True,
+        deadline=5.0,
+    )
+
+    assert result == "budget_exhausted"
+    assert conversation.run_calls == 1  # the initial run only — no approved retry
+
+
+def test_verify_and_report_reports_budget_exhausted_at_entry(monkeypatch):
+    monkeypatch.setattr(runner, "_run_verification", lambda _dir: _run(_check(summary="3 passed")))
+    conversation = _FakeConversation()
+
+    outcome = runner._verify_and_report(
+        conversation, _cfg(verify_tests="always"), lambda _m: None, "do the thing", deadline=-1.0
+    )
+
+    assert outcome.verification_state == "budget_exhausted"
+    assert conversation.run_calls == 0
+
+
+def test_verify_and_report_reports_budget_exhausted_mid_retry(monkeypatch):
+    # deadline is still valid at entry (the first time.monotonic() call
+    # returns a value below it) but exhausted by the time the retry loop's
+    # own _run_with_confirmation call checks again (the second call).
+    monkeypatch.setattr(
+        runner,
+        "_run_verification",
+        lambda _dir: _run(_check(status="failed", exit_code=1, summary="1 failed")),
+    )
+    conversation = _FakeConversation()
+    clock = iter([0.0, 100.0])
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(clock))
+
+    outcome = runner._verify_and_report(
+        conversation,
+        _cfg(verify_tests="always", max_verify_retries=5),
+        lambda _m: None,
+        "do the thing",
+        on_confirm=None,
+        deadline=50.0,
+    )
+
+    assert outcome.verification_state == "budget_exhausted"
+    assert outcome.retries_used == 1
+    assert conversation.run_calls == 0
+
+
+def test_enforce_task_tracker_completion_reports_budget_exhausted_at_entry():
+    conversation = _FakeConversation(
+        initial_events=[_task_list_event({"title": "B", "status": "todo"})]
+    )
+
+    outcome = runner._enforce_task_tracker_completion(
+        conversation, _cfg(max_verify_retries=2), lambda _m: None, "do the thing", deadline=-1.0
+    )
+
+    assert outcome is not None
+    assert outcome.verification_state == "budget_exhausted"
+    assert conversation.run_calls == 0
+
+
+def test_enforce_task_tracker_completion_reports_budget_exhausted_mid_retry(monkeypatch):
+    # Same shape as _verify_and_report's equivalent test: deadline is still
+    # valid at entry, exhausted by the time the retry loop's own
+    # _run_with_confirmation call checks again.
+    conversation = _FakeConversation(
+        initial_events=[_task_list_event({"title": "B", "status": "todo"})]
+    )
+    clock = iter([0.0, 100.0])
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(clock))
+
+    outcome = runner._enforce_task_tracker_completion(
+        conversation,
+        _cfg(max_verify_retries=5),
+        lambda _m: None,
+        "do the thing",
+        on_confirm=None,
+        deadline=50.0,
+    )
+
+    assert outcome is not None
+    assert outcome.verification_state == "budget_exhausted"
+    assert outcome.retries_used == 1
+    assert conversation.run_calls == 0
+
+
+def test_stream_task_short_circuits_when_task_budget_already_exhausted(monkeypatch):
+    # First time.monotonic() call computes `deadline = now + max_task_seconds`
+    # inside stream_task; the second is _run_with_confirmation's own check,
+    # simulating that max_task_seconds' worth of wall-clock time has already
+    # passed between the two (a tiny max_task_seconds makes this realistic,
+    # but the clock is mocked so the test doesn't need to actually wait).
+    conversation = _RecordingConversation()
+    monkeypatch.setattr(runner, "Conversation", lambda **_kwargs: conversation)
+    monkeypatch.setattr(runner, "build_agent", lambda cfg: "fake-agent")
+    monkeypatch.setattr(runner, "build_workspace", lambda cfg: nullcontext("fake-workspace"))
+    tracker_calls = {"count": 0}
+    monkeypatch.setattr(
+        runner,
+        "_enforce_task_tracker_completion",
+        lambda *a, **kw: tracker_calls.__setitem__("count", tracker_calls["count"] + 1),
+    )
+    clock = iter([0.0, 100.0])
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(clock))
+
+    outcome = runner.stream_task("do the thing", cfg=_cfg(max_task_seconds=1, verify_tests="never"))
+
+    assert outcome.verification_state == "budget_exhausted"
     assert tracker_calls["count"] == 0  # never reached task_tracker enforcement
 
 

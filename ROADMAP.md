@@ -36,7 +36,12 @@ build plan. This file is the living, evolving companion to that static plan.
   `..`-containing `project` name outright, then rejects a resolved,
   symlink-followed (`os.path.realpath`) path that falls outside
   `projects_dir`, raising `ConfigError` either way so both callers keep
-  using the error type they already catch.
+  using the error type they already catch. `max_task_seconds` (from
+  `HARNESS_MAX_TASK_SECONDS`, default `1800`) is the shared, task-level
+  wall-clock budget `runner.py` enforces across every phase of one task —
+  see "Decisions log" below for why this, not a reverse-engineered
+  cumulative iteration count, closes the "one `HARNESS_MAX_ITERATIONS`
+  doesn't bound a whole task" gap.
 - `llm.py` / `tools.py` / `agent.py` — SDK wiring; default preset tools + `run_tests`.
   `llm.py`'s `build_llm()` only passes `reasoning_effort` to the SDK's `LLM(...)`
   when `cfg.reasoning_effort` is set, so the SDK's own default (`"high"`)
@@ -108,7 +113,24 @@ build plan. This file is the living, evolving companion to that static plan.
   supplies a real terminal `input()`-based handler
   (`_confirm_pending_actions`) only when `cfg.confirm_mode == "always"`;
   `server.py` supplies none. See MANUAL.md "Confirmation mode" and
-  "Decisions log" below.
+  "Decisions log" below. Also now enforces `HARNESS_MAX_TASK_SECONDS`, a
+  shared, task-level wall-clock budget spanning every phase combined (the
+  initial run and both retry loops) — `HARNESS_MAX_ITERATIONS` alone only
+  bounds a single `conversation.run()` call, and each of the (up to three)
+  calls per task gets its own fresh iteration budget from the SDK, so a
+  task could otherwise spend roughly `HARNESS_MAX_ITERATIONS × (1 + 2 ×
+  HARNESS_MAX_VERIFY_RETRIES)` iterations with no single value bounding
+  the total. `_run_with_confirmation()` now returns one of three string
+  outcomes (`"ok"`/`"confirmation_required"`/`"budget_exhausted"`, not a
+  bool) and checks an absolute `time.monotonic()` `deadline` before every
+  single `.run()` call it makes, including each confirm-mode approve/
+  reject round-trip; `_verify_and_report`/`_enforce_task_tracker_completion`
+  each also check it once at entry. Exhausting it produces a new
+  `"budget_exhausted"` terminal `verification_state`, short-circuiting
+  whichever later phases hadn't run yet — same short-circuit shape as
+  `"confirmation_required"` and `"incomplete"`. See MANUAL.md "Task
+  budget" and "Decisions log" below for why wall-clock was chosen over
+  reverse-engineering the SDK's internal per-call iteration count.
 - `custom_tools/run_tests_tool.py` — a language-neutral verification
   pipeline in four explicit, independently-tested stages: **project
   detection** (`detect_project()`, one marker-file walk covering Python/
@@ -537,6 +559,113 @@ build plan. This file is the living, evolving companion to that static plan.
 
 ## Decisions log (why, not just what)
 
+- **Global task execution budget: a wall-clock deadline
+  (`HARNESS_MAX_TASK_SECONDS`), not a reverse-engineered cumulative
+  iteration counter.** The gap itself was concrete and already precisely
+  quantified before this change: `runner.py` calls `conversation.run()` up
+  to three times per task (the initial run, then up to
+  `HARNESS_MAX_VERIFY_RETRIES` more in each of the two retry loops), and
+  `local_conversation.py`'s own `run()` method resets its `iteration`
+  counter to `0` on every single call — confirmed by reading the SDK
+  source directly, not assumed — so `HARNESS_MAX_ITERATIONS` alone cannot
+  bound how many total iterations one task consumes across all three call
+  sites (`HARNESS_MAX_ITERATIONS × (1 + 2 × HARNESS_MAX_VERIFY_RETRIES)`
+  in the worst case). The item's own wording explicitly accepted "an
+  iteration, wall-clock, or equivalent task-level budget" as satisfying
+  the ask, which mattered here: the two options are not equally cheap or
+  equally safe to build.
+  - **Why not iteration-count accounting.** The SDK exposes no API to read
+    back how many iterations a completed `.run()` call actually consumed
+    — only whether it hit its own `max_iteration_per_run` cap. The only
+    way to reconstruct a count would be inferring "one iteration ≈ one new
+    `ActionEvent`" from `conversation.state.events`, verified live to be
+    *approximately* true (every tool call, including `finish` itself,
+    produces exactly one `ActionEvent`) but confirmed **not exact**: this
+    file's own Known Limitations already documents a live case where the
+    agent's final turn is plain text with no tool call at all (the "a
+    plain-text reply ends the run exactly like `finish`" entry) — that
+    iteration produces no `ActionEvent`, so an event-counting approach
+    would systematically undercount by one in exactly the ambiguous case
+    this project has already been burned by once. Reimplementing the
+    SDK's own internal step-counting logic in harness code is also a
+    direct SDK-drift risk (golden rule 2): it works today by inference
+    from event shapes the SDK never contractually promised, and could
+    silently break on an upgrade with no test able to catch it short of a
+    live run.
+  - **Why wall-clock instead.** Trivial to implement correctly
+    (`time.monotonic()` before/after, no SDK internals involved, zero
+    drift risk), and arguably closer to what a user actually cares about
+    for a runaway-task safety valve — "how long is this going to run" —
+    than an exact step count, which even a correct implementation
+    wouldn't translate into a cost or time guarantee anyway (a fast cheap
+    iteration and a slow expensive one both count as "1"). A separate,
+    genuine $-cost ceiling is tracked separately (`todo.md`'s "Per-task
+    cost ceiling" item) rather than folded into this one — iteration
+    count, wall-clock time, and dollar cost are three different
+    quantities, and conflating them would have made this change do more
+    than the one thing it was asked to do.
+  - **Single choke point: `_run_with_confirmation()` checks the deadline,
+    not three separate checks at each call site.** That function already
+    wrapped every `conversation.run()` call in `runner.py` (added for
+    `HARNESS_CONFIRM_MODE=always`) — extending it to also check
+    `deadline` before each call, and changing its return type from `bool`
+    to a three-way string (`"ok"`/`"confirmation_required"`/
+    `"budget_exhausted"`), closed the gap in one place rather than
+    duplicating a `time.monotonic() >= deadline` check at three call
+    sites. A shared `_outcome_for_run_result()` helper builds the right
+    `TaskOutcome` for either non-`"ok"` result, so `stream_task`,
+    `_enforce_task_tracker_completion`, and `_verify_and_report` each only
+    need a two-line branch instead of their own copy of the contract-
+    selection logic.
+  - **Checked before *every* `.run()` call inside `_run_with_confirmation`,
+    including confirm-mode retries — not just once per phase.** A long
+    approve/reject back-and-forth under `HARNESS_CONFIRM_MODE=always` is
+    itself an unbounded sequence of `.run()` calls (bounded only by how
+    many actions a human is willing to sit through) — checking the
+    deadline only at function entry would have left exactly the kind of
+    unbounded-retry gap this whole feature exists to close, just moved
+    one level down.
+  - **`_verify_and_report`/`_enforce_task_tracker_completion` also each
+    check the deadline once at entry**, in addition to relying on
+    `_run_with_confirmation`'s per-call check inside their retry loops —
+    matches the established "check at entry and after every retry"
+    pattern already used for `_ABORTED_STATUSES` in both functions, so a
+    budget that expired during a slow `_run_verification()` subprocess
+    call (which has its own internal timeout, not tied to this budget) is
+    still caught promptly on the next phase rather than silently ignored.
+  - **Default `1800` seconds (30 minutes), enabled by default, not an
+    opt-in `0`/`None` = unlimited.** Unlike `--require-verification`
+    (a genuine behavior-changing default fork the user was asked about
+    directly), this is a pure safety backstop in the same spirit as
+    `HARNESS_MAX_ITERATIONS`'s own always-on default (`50`) — CLAUDE.md's
+    golden rule 6 ("harness code must enforce iteration limits... wherever
+    possible") applies directly, and a generous default value carries
+    negligible risk of tripping during normal use while still bounding the
+    genuinely pathological case this item was written to catch.
+  - **Existing internal test call sites for `_run_with_confirmation`,
+    `_verify_and_report`, and `_enforce_task_tracker_completion` were kept
+    working unchanged** by giving `deadline` a default of `float("inf")`
+    (and keeping `on_confirm`'s pre-existing `None` default) at the
+    function level, even though the one real production caller
+    (`stream_task`) always computes and passes a real deadline from
+    `cfg.max_task_seconds`. Avoided rewriting roughly two dozen pre-existing,
+    already-reviewed test call sites for a parameter irrelevant to what
+    they were actually testing — the four call sites that specifically
+    test `_run_with_confirmation`'s return value did still need updating,
+    since its return type itself changed from `bool` to a string.
+  - Verified live end-to-end, not just via unit tests: a real task with
+    `HARNESS_MAX_TASK_SECONDS=1` completed its actual work (created a
+    file) within its single `.run()` call, then correctly reported
+    `budget_exhausted` once control returned to `runner.py`'s post-run
+    checks, with exit code `1` — and a real task under the default budget
+    behaved identically to before this change. Also caught, live, a real
+    omission this same verification pass would have missed if skipped:
+    `cli.py`'s nonzero-exit tuple was not updated for the new
+    `"budget_exhausted"` state on the first pass, confirmed by a live run
+    reporting `budget_exhausted` with exit code `0`, then fixed and
+    re-verified (exit `1`) — a dedicated regression test for exactly this
+    was added and confirmed to fail against the unfixed code before being
+    left in place passing.
 - **`--require-verification`/`require_verification`: opt-in flag with the
   default kept exactly as-is, not a flipped default with an opt-out.**
   This item was raised as a genuine open question — the CLI's own code

@@ -97,20 +97,26 @@ Verified live via the real CLI (same task, same inconclusive result,
 `test_cli.py`/`test_server.py`. See `ROADMAP.md` decisions log and
 `MANUAL.md` "CLI reference"/"Server mode".
 
-### 8. Add a global task execution budget
-`HARNESS_MAX_ITERATIONS` bounds each individual `conversation.run()` call,
-but `runner.py` calls it up to three separate times per task — the initial
-run, then up to `HARNESS_MAX_VERIFY_RETRIES` more for
-`_enforce_task_tracker_completion`'s retries, then up to
-`HARNESS_MAX_VERIFY_RETRIES` more again for `_verify_and_report`'s retries
-— and each call gets a fresh `max_iteration_per_run` budget from the SDK,
-not a shared one. Worst case, a single task can spend roughly
-`HARNESS_MAX_ITERATIONS × (1 + 2 × HARNESS_MAX_VERIFY_RETRIES)` iterations,
-well beyond what the configured cap suggests — not previously documented
-anywhere in `ROADMAP.md`. Track a shared iteration, wall-clock, or
-equivalent task-level budget across all three phases and stop with an
-explicit terminal state when it's exhausted; keep the existing per-run SDK
-limit as a secondary guard, and test the accounting across retries.
+### 8. ~~Add a global task execution budget~~ — DONE
+Added `HARNESS_MAX_TASK_SECONDS` (default `1800`) — a shared, wall-clock
+task-level budget, chosen over reverse-engineering a cumulative iteration
+count (the SDK exposes no API to read back iterations consumed by a past
+`.run()` call, and an event-counting proxy would systematically undercount
+the exact "plain-text reply with no tool call" case already documented as
+a live gotcha in this file). `_run_with_confirmation()` — already the
+single choke point wrapping every `conversation.run()` call — now checks
+an absolute `time.monotonic()` deadline before each call, including every
+confirm-mode approve/reject round-trip, and returns a three-way result
+(`"ok"`/`"confirmation_required"`/`"budget_exhausted"`) instead of a bool;
+`_verify_and_report`/`_enforce_task_tracker_completion` also check it once
+at entry. Exhausting it produces a new `"budget_exhausted"` terminal
+state, wired into `cli.py`'s nonzero-exit set. Verified live end-to-end
+(`HARNESS_MAX_TASK_SECONDS=1`: real work completes, then reports
+`budget_exhausted` with exit `1`; default budget behaves as before) — this
+same live check caught a real omission (the CLI exit-code tuple wasn't
+updated on the first pass), fixed and re-verified, with a dedicated
+regression test confirmed to fail against the unfixed code. See
+`ROADMAP.md` decisions log and `MANUAL.md` "Task budget".
 
 ### 9. Add machine-checkable acceptance criteria
 `CompletionContract.acceptance_criteria` (`runner.py`) is just descriptive

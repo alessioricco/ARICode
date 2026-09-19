@@ -442,6 +442,31 @@ def test_exits_nonzero_when_agent_got_stuck(monkeypatch, capsys):
     assert "Verification: stuck" in capsys.readouterr().out
 
 
+def test_exits_nonzero_when_task_budget_is_exhausted(monkeypatch, capsys):
+    def _fake_run_task(task, cfg=None, on_confirm=None):
+        return _fake_result(
+            [_FakeMessage("ran out of time")],
+            verification_state="budget_exhausted",
+            limitations=[
+                (
+                    "The task's shared wall-clock budget (HARNESS_MAX_TASK_SECONDS=1800) "
+                    "ran out before the task reached a normal finish, so its own "
+                    "completion claim, if any, was not verified."
+                )
+            ],
+        )
+
+    monkeypatch.setattr(cli, "load_config", lambda: _cfg())
+    monkeypatch.setattr(cli, "run_task", _fake_run_task)
+
+    exit_code = cli.main(["do something"])
+
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "Verification: budget_exhausted" in out
+    assert "HARNESS_MAX_TASK_SECONDS" in out
+
+
 def test_inconclusive_verification_still_exits_zero_but_is_visible(monkeypatch, capsys):
     # Inconclusive isn't an error (nothing was proven broken), but it must
     # not look like a silent, confirmed success either.

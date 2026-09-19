@@ -14,6 +14,7 @@ from harness.config import (
     DEFAULT_DOCKER_PLATFORM,
     DEFAULT_EXECUTION,
     DEFAULT_MAX_ITERATIONS,
+    DEFAULT_MAX_TASK_SECONDS,
     DEFAULT_MAX_VERIFY_RETRIES,
     DEFAULT_PROJECTS_DIR,
     DEFAULT_SKILLS_DIR,
@@ -105,6 +106,22 @@ def test_invalid_verify_tests_raises():
 def test_invalid_max_verify_retries_raises(bad):
     with pytest.raises(ConfigError, match="HARNESS_MAX_VERIFY_RETRIES"):
         load_config(_base_env(HARNESS_MAX_VERIFY_RETRIES=bad))
+
+
+def test_max_task_seconds_defaults_when_unset():
+    cfg = load_config(_base_env())
+    assert cfg.max_task_seconds == DEFAULT_MAX_TASK_SECONDS
+
+
+def test_max_task_seconds_reads_a_custom_value():
+    cfg = load_config(_base_env(HARNESS_MAX_TASK_SECONDS="60"))
+    assert cfg.max_task_seconds == 60
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "abc", "3.5"])
+def test_invalid_max_task_seconds_raises(bad):
+    with pytest.raises(ConfigError, match="HARNESS_MAX_TASK_SECONDS"):
+        load_config(_base_env(HARNESS_MAX_TASK_SECONDS=bad))
 
 
 def test_invalid_docker_platform_raises():

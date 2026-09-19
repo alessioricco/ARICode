@@ -218,13 +218,14 @@ def main(argv: list[str] | None = None) -> int:
     # runner.py's TaskOutcome / MANUAL.md "Test verification". A task whose
     # verification failed and couldn't be fixed, made no observable progress
     # on a fix attempt, kept timing out, whose own task_tracker list was
-    # left incomplete, needed a confirm-mode approval nobody could answer, or
-    # whose run never reached a coherent finish, is a nonzero exit;
-    # "inconclusive" (nothing runnable to check) is not an error but is still
-    # printed so it isn't mistaken for a confirmed pass — unless
-    # --require-verification opted into treating "nothing was checked" as a
-    # failure too (off by default: this is a real behavior change a caller
-    # must ask for, not a silent default flip — see ROADMAP.md).
+    # left incomplete, needed a confirm-mode approval nobody could answer,
+    # ran out of its shared HARNESS_MAX_TASK_SECONDS budget, or whose run
+    # never reached a coherent finish, is a nonzero exit; "inconclusive"
+    # (nothing runnable to check) is not an error but is still printed so
+    # it isn't mistaken for a confirmed pass — unless --require-verification
+    # opted into treating "nothing was checked" as a failure too (off by
+    # default: this is a real behavior change a caller must ask for, not a
+    # silent default flip — see ROADMAP.md).
     outcome = messages.outcome
     print(f"\nVerification: {outcome.verification_state}")
     for note in outcome.completion_contract.limitations:
@@ -235,6 +236,7 @@ def main(argv: list[str] | None = None) -> int:
         "timed_out",
         "incomplete",
         "confirmation_required",
+        "budget_exhausted",
         "stuck",
     ):
         return 1
