@@ -833,13 +833,22 @@ live in `src/harness/custom_tools/`:
      manifest but real `.py` source present still resolves to Python (the
      original always-try-pytest default, preserved for a bare directory of
      test files); no marker and no Python source at all resolves to
-     `"unknown"`.
+     `"unknown"`. If the workspace root itself has a manifest, that's used
+     immediately — no further scanning needed. Otherwise, if more than one
+     *distinct directory* has its own manifest at the same (shallowest)
+     depth — a monorepo/workspace with more than one candidate project and
+     no single obvious root, e.g. sibling `frontend/package.json` and
+     `backend/pyproject.toml` — this resolves to `"ambiguous"` rather than
+     silently verifying whichever one a directory walk happens to visit
+     first; point `HARNESS_WORKSPACE`/`--project` at the specific project to
+     resolve it.
   2. **Verification-plan discovery** (`discover_verification_plan()`) — pure
      (file reads + `shutil.which` lookups, no subprocess execution): given a
      detected language, decides which commands apply. Never invents a
      command a project doesn't itself configure or that can't be safely
-     inferred — an unknown project gets a single explicit "verification
-     unavailable" entry instead of a guess.
+     inferred — an unknown or ambiguous project gets a single explicit
+     "verification unavailable" entry (naming every candidate, for the
+     ambiguous case) instead of a guess.
   3. **Verification command execution** (`execute_check()`) — the only stage
      that spawns a subprocess; turns one planned check into a structured
      result.
@@ -960,7 +969,7 @@ event — see [CLI reference](#cli-reference) / [Server mode](#server-mode-httpw
 | State | Meaning |
 |---|---|
 | `verified` | The project's primary check actually ran and passed. A configured secondary check (lint/typecheck/`go vet`/`cargo check`/`cargo clippy`/etc.) that couldn't run because its tool isn't installed doesn't block this — it's recorded as a limitation instead, not a failure. |
-| `inconclusive` | Nothing runnable confirmed the software works — either the specific "pytest collected zero tests" signal (exit code `5`; kept silent/non-blocking, same as before — a project can legitimately have no tests yet), or a genuine "couldn't check anything" case (a required tool isn't installed, or the project type itself is unknown — see the table in [Custom tools](#custom-tools)), which **is** surfaced with a visible harness notice so it isn't mistaken for a confirmed pass. Never returned as `verified` — see the point above about not treating "no tests found" as proof of correctness. |
+| `inconclusive` | Nothing runnable confirmed the software works — either the specific "pytest collected zero tests" signal (exit code `5`; kept silent/non-blocking, same as before — a project can legitimately have no tests yet), or a genuine "couldn't check anything" case (a required tool isn't installed, the project type itself is unknown, or the workspace contains multiple candidate projects with no single obvious root — see the table in [Custom tools](#custom-tools)), which **is** surfaced with a visible harness notice so it isn't mistaken for a confirmed pass. Never returned as `verified` — see the point above about not treating "no tests found" as proof of correctness. |
 | `retry_exhausted` | A real failure (primary or any configured secondary check) was found and sent back to the agent to fix, but it was still failing — with the failure actually changing between attempts (see `no_progress` below for when it doesn't) — after `HARNESS_MAX_VERIFY_RETRIES` attempts. The harness appends its own message saying so plainly, rather than letting the agent's last (possibly optimistic) message stand as the final word. |
 | `no_progress` | A fix attempt was sent back to the agent, but the *very next* verification pass came back with the exact same failing check, same exit code, and the same output (only a run-duration footer, like pytest's `in 3.85s`, is allowed to differ) — meaning that specific attempt provably changed nothing observable. Stops immediately, before exhausting the rest of the retry budget, rather than spending it on further attempts already shown not to help. Confirmed live: an agent edited a comparison operator to "fix" a failing test twice in a row while its own explanatory messages degraded into fluent-sounding but empty prose (see ROADMAP.md's decisions log) — both edits were no-ops for that specific failure (a different code branch handled it), and pytest's output was identical before and after. This is a cheaper, more reliable signal than trying to judge whether the agent's own reasoning text still makes sense — it doesn't read the agent's prose at all, only the verification output. |
 | `timed_out` | A check exceeded its timeout (300s) and was killed — retried the same as a real failure (usually an infinite loop or a hang the agent introduced, worth one more attempt to fix), but kept as its own terminal state rather than folded into `retry_exhausted` if it's still timing out after the retry budget: a persistent hang is a different problem from a wrong answer, worth telling apart at a glance. (Two identical timeouts in a row are `no_progress`, not this — same rule as any other check.) |

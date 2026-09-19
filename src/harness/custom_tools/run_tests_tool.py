@@ -110,19 +110,49 @@ def _find_marker_dir(working_dir: str, names: set[str]) -> str | None:
 @dataclass(frozen=True)
 class ProjectDetection:
     """Stage 1 result: what kind of project this is, and where its
-    verification commands should run from."""
+    verification commands should run from.
 
-    # "python" | "node" | "go" | "rust" | "java-maven" | "java-gradle" | "unknown"
+    `candidates` is only set when `language == "ambiguous"`: every
+    (language, root) pair found at the shallowest depth where more than one
+    distinct directory matched, so a caller/message can name them instead of
+    silently picking one (see `detect_project`'s docstring).
+    """
+
+    # "python" | "node" | "go" | "rust" | "java-maven" | "java-gradle" |
+    # "ambiguous" | "unknown"
     language: str
     root: str
+    candidates: tuple[tuple[str, str], ...] | None = None
 
 
 def detect_project(working_dir: str) -> ProjectDetection:
     """Detect the project's language/ecosystem from unambiguous manifest
     markers — a single depth-bounded tree walk checking every known
-    ecosystem's markers together (not one walk per language), so which
-    marker is found *shallowest* wins regardless of check order, and within
-    one directory the `_LANGUAGE_MARKERS` order (Python first) breaks ties.
+    ecosystem's markers together (not one walk per language), collecting
+    every match grouped by depth so the *truly* shallowest directory/
+    directories can be compared, rather than whichever one a top-down
+    `os.walk` happens to visit first (a DFS visits an entire first branch,
+    however deep, before a shallower sibling branch — "first found" and
+    "shallowest" are not the same thing).
+
+    If `working_dir` itself matches (depth 0), that's authoritative and
+    returned immediately — the caller already told us this exact directory
+    is the project (e.g. `HARNESS_WORKSPACE`/`--project`), so there is
+    nothing to disambiguate even if deeper subdirectories also happen to
+    contain manifests (a project's own vendored dependency, a nested
+    example, etc.).
+
+    Otherwise, once the shallowest depth containing any match is found: if
+    exactly one directory matched there, that's the project, same as
+    before. If *multiple distinct directories* matched at that same
+    shallowest depth — a monorepo/workspace with more than one candidate
+    project and no single obvious root — this reports `"ambiguous"` with
+    every candidate listed on `.candidates`, rather than silently choosing
+    one based on directory-walk/listing order. (A single directory matching
+    more than one language's markers, e.g. both `pyproject.toml` and
+    `package.json` in the same directory, is a different, narrower case and
+    is still resolved by `_LANGUAGE_MARKERS` order — not what "ambiguous"
+    means here.)
 
     Falls back to "python" when no manifest is found but real Python source
     is present (`*.py` files) — this is what keeps a bare directory of
@@ -134,6 +164,7 @@ def detect_project(working_dir: str) -> ProjectDetection:
     guessing a command (see `discover_verification_plan`).
     """
     base_depth = working_dir.rstrip(os.sep).count(os.sep)
+    matches_by_depth: dict[int, list[tuple[str, str]]] = {}
     python_source_root: str | None = None
     for root, dirs, files in os.walk(working_dir):
         depth = root.rstrip(os.sep).count(os.sep) - base_depth
@@ -141,11 +172,25 @@ def detect_project(working_dir: str) -> ProjectDetection:
             dirs[:] = []
             continue
         dirs[:] = [d for d in dirs if d not in _SKIP_DIRS and not d.startswith(".")]
-        for language, markers in _LANGUAGE_MARKERS:
-            if any(marker in files for marker in markers):
-                return ProjectDetection(language=language, root=root)
+        if depth == 0:
+            for language, markers in _LANGUAGE_MARKERS:
+                if any(marker in files for marker in markers):
+                    return ProjectDetection(language=language, root=root)
+        else:
+            for language, markers in _LANGUAGE_MARKERS:
+                if any(marker in files for marker in markers):
+                    matches_by_depth.setdefault(depth, []).append((language, root))
+                    break  # one match per directory — same-dir ties are not "ambiguous"
         if python_source_root is None and any(f.endswith(".py") for f in files):
             python_source_root = root
+    if matches_by_depth:
+        shallowest = matches_by_depth[min(matches_by_depth)]
+        if len(shallowest) == 1:
+            language, root = shallowest[0]
+            return ProjectDetection(language=language, root=root)
+        return ProjectDetection(
+            language="ambiguous", root=working_dir, candidates=tuple(shallowest)
+        )
     if python_source_root is not None:
         return ProjectDetection(language="python", root=python_source_root)
     return ProjectDetection(language="unknown", root=working_dir)
@@ -191,7 +236,7 @@ class RunTestsAction(Action):
 
 class RunTestsObservation(Observation):
     # "pytest" | "npm_build" | "go" | "rust" | "java-maven" | "java-gradle" |
-    # "unknown" | "none" (couldn't verify at all, e.g. npm missing)
+    # "ambiguous" | "unknown" | "none" (couldn't verify at all, e.g. npm missing)
     check_kind: str = "pytest"
     exit_code: int = 0
     passed: int = 0
@@ -911,7 +956,10 @@ def discover_verification_plan(detection: ProjectDetection) -> list[CheckSpec]:
     (file reads and `shutil.which` lookups only, no subprocess execution).
     Never invents a check the project doesn't itself configure; an unknown
     project gets a single synthetic check explaining that plainly rather
-    than a guessed command.
+    than a guessed command. An "ambiguous" detection (multiple candidate
+    projects, no single obvious root — see `detect_project`) gets the same
+    treatment: one synthetic, unavailable check naming every candidate,
+    instead of silently verifying whichever one was found first.
     """
     if detection.language == "python":
         return _python_plan(detection.root)
@@ -923,6 +971,24 @@ def discover_verification_plan(detection: ProjectDetection) -> list[CheckSpec]:
         return _rust_plan(detection.root)
     if detection.language in ("java-maven", "java-gradle"):
         return _java_plan(detection)
+    if detection.language == "ambiguous":
+        candidates = ", ".join(
+            f"{root} ({language})" for language, root in (detection.candidates or ())
+        )
+        return [
+            CheckSpec(
+                name="verification",
+                primary=True,
+                command=None,
+                cwd=detection.root,
+                unavailable_reason=(
+                    "Multiple candidate projects were found with no single "
+                    f"obvious root — verification is ambiguous: {candidates}. "
+                    "Point HARNESS_WORKSPACE/--project at the specific "
+                    "project to verify instead of the shared parent directory."
+                ),
+            )
+        ]
     return [
         CheckSpec(
             name="verification",

@@ -278,16 +278,27 @@ supported checks through the common executor, with closed stdin, CI/
 non-interactive environment handling, bounded output, and process-group
 cleanup. Add focused tests for timeout and missing-executable behavior.
 
-### 21. Handle ambiguous nested projects and monorepos explicitly
-`detect_project()` walks the tree and returns on the *first* matching
-manifest it finds (shallowest wins, then declaration order, then walk
-order) — it has no concept of "multiple candidate projects" at all. In a
-monorepo or workspace containing multiple applications, this can silently
-verify the wrong child project and produce a misleading result. Prefer an
-explicit project root when one is supplied; otherwise aggregate compatible
-projects or return an `ambiguous`/`inconclusive` result listing the
-candidates instead of choosing one based on directory-walk order. Add
-fixtures with multiple manifests.
+### 21. ~~Handle ambiguous nested projects and monorepos explicitly~~ — DONE
+`detect_project()` now collects every manifest match grouped by depth
+during its single tree walk instead of returning on the first one a DFS
+happens to visit (which wasn't actually "shallowest wins" as claimed —
+`os.walk` fully explores one branch before a shallower sibling). The
+workspace root itself, if it has a manifest, is authoritative and returned
+immediately (the caller's `HARNESS_WORKSPACE`/`--project` already *is* the
+explicit root — nothing further to disambiguate). Otherwise, if more than
+one distinct directory matches at the shallowest depth found, detection
+reports a new `ProjectDetection(language="ambiguous", candidates=(...))`
+instead of picking one; `discover_verification_plan()` turns that into a
+single `unavailable` check naming every candidate's language and path,
+reusing the existing `"unknown"`-project/`inconclusive` plumbing rather
+than inventing a new terminal state. Same-directory multi-marker ties
+(e.g. both `pyproject.toml` and `package.json` in one directory) are
+unaffected — still resolved by marker priority order, a deliberately
+separate, narrower case. 7 new tests (sibling projects, listing-order
+independence, explicit-root-wins, shallower-single-match-wins, plan
+discovery, full-pipeline integration, agent-facing tool coverage);
+verified live against a real on-disk `frontend/`+`backend/` monorepo
+fixture. See `ROADMAP.md`'s decisions log for the full reasoning.
 
 ---
 

@@ -133,6 +133,24 @@ def test_run_tests_tool_generic_path_covers_go(tmp_path, monkeypatch):
     assert "not installed" in observation.summary
 
 
+def test_run_tests_tool_generic_path_covers_ambiguous_monorepo(tmp_path):
+    # The agent-facing tool must not silently pick one of several candidate
+    # projects either — same generic (detect -> discover -> execute) path
+    # as Go/Rust/Java above.
+    frontend = tmp_path / "frontend"
+    frontend.mkdir()
+    _write_package_json(frontend, {"build": "vite build"})
+    backend = tmp_path / "backend"
+    backend.mkdir()
+    (backend / "pyproject.toml").write_text("[project]\nname = 'backend'\n")
+    executor = RunTestsExecutor(str(tmp_path))
+
+    observation = executor(RunTestsAction())
+
+    assert observation.check_kind == "ambiguous"
+    assert "ambiguous" in observation.summary
+
+
 # --- Stage 1: project detection ---------------------------------------------
 
 
@@ -237,6 +255,78 @@ def test_finds_a_marker_nested_below_the_workspace_root(tmp_path):
     detection = detect_project(str(tmp_path))
 
     assert detection == ProjectDetection(language="node", root=str(nested))
+
+
+def test_sibling_projects_at_the_same_depth_are_ambiguous(tmp_path):
+    # A monorepo/workspace with two unrelated applications, neither at the
+    # workspace root — no single obvious project to verify.
+    frontend = tmp_path / "frontend"
+    frontend.mkdir()
+    _write_package_json(frontend, {"build": "vite build"})
+    backend = tmp_path / "backend"
+    backend.mkdir()
+    (backend / "pyproject.toml").write_text("[project]\nname = 'backend'\n")
+
+    detection = detect_project(str(tmp_path))
+
+    assert detection.language == "ambiguous"
+    assert detection.root == str(tmp_path)
+    assert detection.candidates is not None
+    assert set(detection.candidates) == {
+        ("node", str(frontend)),
+        ("python", str(backend)),
+    }
+
+
+def test_ambiguous_candidates_are_reported_regardless_of_directory_listing_order(tmp_path):
+    # Two candidates at the same depth, same languages, different names —
+    # confirms the walk collects every match at the shallowest depth rather
+    # than stopping at the first one a DFS happens to visit.
+    app_a = tmp_path / "app-a"
+    app_a.mkdir()
+    _write_package_json(app_a, {"build": "vite build"})
+    app_b = tmp_path / "app-b"
+    app_b.mkdir()
+    _write_package_json(app_b, {"build": "vite build"})
+
+    detection = detect_project(str(tmp_path))
+
+    assert detection.language == "ambiguous"
+    assert set(detection.candidates) == {
+        ("node", str(app_a)),
+        ("node", str(app_b)),
+    }
+
+
+def test_explicit_root_with_its_own_manifest_is_not_ambiguous(tmp_path):
+    # The workspace root itself is the intended project (e.g. HARNESS_WORKSPACE
+    # /--project already points at it) — a nested manifest elsewhere (a
+    # vendored dependency, an example) must not turn this into "ambiguous".
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'fixture'\n")
+    vendored = tmp_path / "vendor" / "some-lib"
+    vendored.mkdir(parents=True)
+    _write_package_json(vendored, {"build": "vite build"})
+
+    detection = detect_project(str(tmp_path))
+
+    assert detection == ProjectDetection(language="python", root=str(tmp_path))
+
+
+def test_a_single_shallower_match_wins_over_deeper_sibling_matches(tmp_path):
+    # Only the shallowest depth's matches are candidates — a single match
+    # there is unambiguous even if more projects exist further down.
+    (tmp_path / "app" / "pyproject.toml").parent.mkdir(parents=True)
+    (tmp_path / "app" / "pyproject.toml").write_text("[project]\nname = 'app'\n")
+    nested_a = tmp_path / "app" / "vendor" / "a"
+    nested_a.mkdir(parents=True)
+    _write_package_json(nested_a, {"build": "vite build"})
+    nested_b = tmp_path / "app" / "vendor" / "b"
+    nested_b.mkdir(parents=True)
+    _write_package_json(nested_b, {"build": "vite build"})
+
+    detection = detect_project(str(tmp_path))
+
+    assert detection == ProjectDetection(language="python", root=str(tmp_path / "app"))
 
 
 # --- Stage 2: verification-plan discovery (pure, no subprocess) ------------
@@ -443,6 +533,23 @@ def test_unknown_project_plan_is_a_single_unavailable_check(tmp_path):
     assert plan[0].primary is True
     assert plan[0].command is None
     assert "No known project type" in plan[0].unavailable_reason
+
+
+def test_ambiguous_project_plan_is_a_single_unavailable_check_naming_candidates(tmp_path):
+    detection = ProjectDetection(
+        language="ambiguous",
+        root=str(tmp_path),
+        candidates=(("node", str(tmp_path / "frontend")), ("python", str(tmp_path / "backend"))),
+    )
+
+    plan = discover_verification_plan(detection)
+
+    assert len(plan) == 1
+    assert plan[0].primary is True
+    assert plan[0].command is None
+    assert "ambiguous" in plan[0].unavailable_reason
+    assert str(tmp_path / "frontend") in plan[0].unavailable_reason
+    assert str(tmp_path / "backend") in plan[0].unavailable_reason
 
 
 # --- Stage 3: command execution ---------------------------------------------
@@ -882,6 +989,27 @@ def test_full_verification_unknown_project_is_inconclusive_and_unavailable(tmp_p
     assert run.state == "inconclusive"
     assert run.checks[0].status == "unavailable"
     assert run.limitation_notes
+
+
+def test_full_verification_monorepo_with_sibling_projects_is_inconclusive_and_unavailable(
+    tmp_path,
+):
+    # A workspace containing two unrelated applications with no manifest of
+    # its own — full pipeline must not silently verify just one of them.
+    frontend = tmp_path / "frontend"
+    frontend.mkdir()
+    _write_package_json(frontend, {"build": "vite build"})
+    backend = tmp_path / "backend"
+    backend.mkdir()
+    (backend / "pyproject.toml").write_text("[project]\nname = 'backend'\n")
+
+    run = run_full_verification(str(tmp_path))
+
+    assert run.state == "inconclusive"
+    assert run.checks[0].status == "unavailable"
+    assert "ambiguous" in run.limitation_notes[0]
+    assert str(frontend) in run.limitation_notes[0]
+    assert str(backend) in run.limitation_notes[0]
 
 
 def test_full_verification_runs_ruff_when_configured_and_available(tmp_path):

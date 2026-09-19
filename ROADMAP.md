@@ -189,7 +189,11 @@ build plan. This file is the living, evolving companion to that static plan.
   `stdin=subprocess.DEVNULL` — now the default for every check, not just
   this one, closing a latent hang risk). See "Decisions log" below for why
   this generalization was scoped this way, and for what's genuinely
-  verified vs. only detected per language.
+  verified vs. only detected per language. `detect_project()` also now
+  recognizes and reports monorepo ambiguity (`language="ambiguous"`,
+  `.candidates` listing every `(language, root)` pair found) instead of
+  silently picking one candidate project by directory-walk order — see the
+  matching decisions-log entry.
 - `cli.py` — `python -m harness "<task>" [--execution] [--project] [--agents-md]
   [--model] [--api-key] [--base-url] [--reasoning-effort]
   [--require-verification] [--acceptance-checks]`. `task` is resolved via
@@ -1826,3 +1830,75 @@ build plan. This file is the living, evolving companion to that static plan.
     ask than this feature justifies. `test_task_store.py`'s module
     docstring states this explicitly rather than leaving "why isn't mysql/
     postgres tested" to be rediscovered later.
+- **Monorepo/nested-project ambiguity: a new `"ambiguous"` `ProjectDetection`
+  state carrying every candidate, not silently picking the directory-walk
+  order's first match.** `detect_project()`'s existing docstring already
+  claimed "shallowest directory wins," but that wasn't actually true for
+  matches in different branches of the tree: `os.walk` is a DFS, so it
+  fully explores a first subdirectory (however deep) before ever visiting
+  a shallower sibling — a manifest two levels down a first-visited branch
+  would be returned even if an unrelated project's manifest sat one level
+  down a not-yet-visited sibling. This was a real, if subtle, correctness
+  gap for a monorepo/workspace shape (e.g. sibling
+  `frontend/package.json` and `backend/pyproject.toml`), not just a
+  theoretical one — before this fix, which of the two got "verified" (and
+  which got silently ignored) depended on filesystem/`os.scandir` listing
+  order, not anything meaningful about the project.
+  - **Fixed by collecting every match grouped by depth during the same
+    single tree walk, then comparing only the truly shallowest depth's
+    matches**, rather than returning on the first hit. This both fixes the
+    "shallowest actually wins" claim (making the docstring accurate) and
+    is the mechanism ambiguity detection needed anyway (comparing what's
+    at the winning depth). A depth with exactly one match behaves exactly
+    as before; a depth with more than one distinct directory becomes
+    `"ambiguous"`.
+  - **The workspace root itself (depth 0) is checked and returned
+    immediately, before any walk-driven comparison, and is never subject
+    to "ambiguous."** The root is what the caller (`HARNESS_WORKSPACE`/
+    `--project`) already told the harness the project *is* — a deeper
+    manifest elsewhere under it (a vendored dependency, a nested example
+    app) is not a second candidate for "what is the project," it's just
+    something else that happens to exist underneath it. This is also
+    exactly the "prefer an explicit project root when one is supplied"
+    half of the original ask — the existing per-request/`--project`
+    mechanism already *is* that explicit root; no new parameter was needed
+    to satisfy it, only making sure it's never overridden by ambiguity
+    logic.
+  - **Same-directory multi-marker ties (e.g. both `pyproject.toml` and
+    `package.json` in one directory) are deliberately not treated as
+    ambiguous** — resolved by the pre-existing `_LANGUAGE_MARKERS` priority
+    order (Python wins), same as before this change. That case was already
+    explicitly called out in the marker table's own comment as "an
+    unscoped monorepo edge case, not a real per-project decision" — one
+    directory with two manifest files is a different, narrower question
+    than "which of several separate directories is the project," and
+    conflating the two would have turned an already-accepted, documented
+    simplification into a behavior change with no clear improvement (there
+    is no more "correct" choice between two markers in the same directory
+    than the existing priority order already makes).
+  - **Ambiguity resolves to a single synthetic `unavailable` `CheckSpec`
+    naming every candidate's language and root**, reusing exactly the same
+    shape `discover_verification_plan()` already used for `"unknown"` —
+    `VerificationRun.state` becomes `"inconclusive"` (not a new state on
+    that enum) and the candidate list surfaces via the existing
+    `limitation_notes` mechanism. Chosen over inventing a distinct
+    aggregate outcome (e.g. `"ambiguous"` as a `VerificationRun.state`
+    value) because "we don't know what to verify" is exactly what
+    `"unknown"`/`inconclusive` already means — the *reason* differs
+    (multiple candidates vs. none recognized) but the caller-facing
+    consequence (nothing was confirmed working, here's why) is identical,
+    and reusing the existing plumbing meant no changes to `runner.py`,
+    `CompletionContract`, or any caller's state-handling code at all — only
+    `run_tests_tool.py` needed to change.
+  - **The agent-facing `run_tests` tool required zero code changes** — it
+    already routed every non-Python/Node language (including `"unknown"`)
+    through the same generic `discover_verification_plan()`/`execute_check()`
+    path instead of a hardcoded branch per language, so `"ambiguous"`
+    picked up the same handling automatically; only a comment documenting
+    the new possible `check_kind` value was added.
+  - Verified live against a real on-disk monorepo fixture (sibling
+    `frontend/package.json` + `backend/pyproject.toml`, neither at the
+    workspace root): `run_full_verification()` reports `state ==
+    "inconclusive"` with a single `unavailable` check naming both
+    candidate paths and languages by their real absolute paths — not
+    simulated, an actual two-project directory tree on disk.
