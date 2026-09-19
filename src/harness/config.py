@@ -144,6 +144,16 @@ class Config:
     task_store_redis_password: str | None = None
     task_store_redis_use_tls: bool = False
 
+    # Opt-in interactive mode (see runner.py's stream_task interactive loop
+    # and agent.py's build_agent): when true, drops _AUTONOMOUS_SUFFIX from
+    # the system prompt so the agent may pause/ask instead of being told to
+    # always push forward on its own. Only meaningful for a caller that also
+    # supplies an on_awaiting_input callback (cli.py's --interactive does;
+    # server.py never does, same as HARNESS_CONFIRM_MODE=always having no
+    # effect there) — default false, current fully-autonomous behavior
+    # unchanged.
+    interactive: bool = False
+
 
 def _clean(value: str | None) -> str | None:
     """Trim whitespace; treat empty string as absent."""
@@ -347,6 +357,11 @@ def load_config(env: Mapping[str, str] | None = None, *, dotenv_path: str = ".en
         default=False,
         name="HARNESS_TASK_STORE_REDIS_USE_TLS",
     )
+    interactive = _parse_bool(
+        env.get("HARNESS_INTERACTIVE"),
+        default=False,
+        name="HARNESS_INTERACTIVE",
+    )
 
     return Config(
         model=model,
@@ -382,6 +397,7 @@ def load_config(env: Mapping[str, str] | None = None, *, dotenv_path: str = ".en
         task_store_redis_db=task_store_redis_db,
         task_store_redis_password=task_store_redis_password,
         task_store_redis_use_tls=task_store_redis_use_tls,
+        interactive=interactive,
     )
 
 

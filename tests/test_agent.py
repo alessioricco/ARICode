@@ -128,3 +128,28 @@ def test_agent_context_still_loads_project_skills():
 
     assert agent.agent_context is not None
     assert agent.agent_context.load_project_skills is True
+
+
+# --- HARNESS_INTERACTIVE=yes: drops _AUTONOMOUS_SUFFIX, keeps the rest -----
+
+
+def test_autonomous_suffix_present_by_default():
+    agent = build_agent(_cfg())
+
+    assert _AUTONOMOUS_SUFFIX in agent.agent_context.system_message_suffix
+
+
+def test_interactive_mode_drops_the_autonomous_suffix():
+    agent = build_agent(_cfg(interactive=True))
+
+    assert _AUTONOMOUS_SUFFIX not in agent.agent_context.system_message_suffix
+
+
+def test_interactive_mode_keeps_every_other_suffix():
+    agent = build_agent(_cfg(interactive=True))
+
+    suffix = agent.agent_context.system_message_suffix
+    assert _README_SUFFIX in suffix
+    assert _NONINTERACTIVE_TOOLING_SUFFIX in suffix
+    assert _VERIFY_BEFORE_FINISH_SUFFIX in suffix
+    assert _LIFECYCLE_SKILLS_SUFFIX in suffix

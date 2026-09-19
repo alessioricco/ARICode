@@ -486,3 +486,32 @@ def test_task_store_redis_use_tls_accepts_false_spellings(value, expected):
 def test_invalid_task_store_redis_use_tls_raises():
     with pytest.raises(ConfigError, match="HARNESS_TASK_STORE_REDIS_USE_TLS"):
         load_config(_base_env(HARNESS_TASK_STORE_REDIS_USE_TLS="maybe"))
+
+
+# --- Interactive mode (HARNESS_INTERACTIVE) ---------------------------------
+
+
+def test_interactive_defaults_to_false():
+    cfg = load_config(_base_env())
+    assert cfg.interactive is False
+
+
+@pytest.mark.parametrize(
+    "value,expected", [("true", True), ("1", True), ("yes", True), ("on", True)]
+)
+def test_interactive_accepts_true_spellings(value, expected):
+    cfg = load_config(_base_env(HARNESS_INTERACTIVE=value))
+    assert cfg.interactive is expected
+
+
+@pytest.mark.parametrize(
+    "value,expected", [("false", False), ("0", False), ("no", False), ("off", False)]
+)
+def test_interactive_accepts_false_spellings(value, expected):
+    cfg = load_config(_base_env(HARNESS_INTERACTIVE=value))
+    assert cfg.interactive is expected
+
+
+def test_invalid_interactive_raises():
+    with pytest.raises(ConfigError, match="HARNESS_INTERACTIVE"):
+        load_config(_base_env(HARNESS_INTERACTIVE="maybe"))

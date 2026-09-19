@@ -314,6 +314,37 @@ def _emit_notice(emit: Callable[[Message], None], text: str) -> None:
 # happens when no callback is given.
 ConfirmCallback = Callable[[Sequence[ActionEvent]], bool]
 
+# A caller-supplied handler for HARNESS_INTERACTIVE=yes: given the narrative
+# text produced since the last checkpoint, return the human's reply (sent
+# back to the agent) or a falsy value to end the interactive loop and let
+# the task proceed to task_tracker/verification as usual. `cli.py` supplies
+# a real terminal-prompting implementation; server.py supplies none (no
+# terminal to prompt at, same reasoning as ConfirmCallback above) — see
+# `stream_task`'s interactive loop for what happens when no callback is
+# given (nothing: cfg.interactive alone has no effect without one).
+OnAwaitingInput = Callable[[str], str | None]
+
+
+def _narrative_text(messages: Sequence[Message]) -> str:
+    """Join the human-readable text of every non-echo message — the same
+    extraction rule as `server.py`'s `_narrative_texts`, kept as its own
+    small copy here rather than imported (`server.py` depends on this
+    module, not the other way around). See that function's docstring for
+    why `role == "assistant"` is the wrong filter: an assistant turn that
+    makes a tool call has empty `content` (the call lives in `tool_calls`);
+    the actual reply/finish text arrives as a `tool`-role message instead.
+    """
+    texts = []
+    for message in messages:
+        if message.role in ("system", "user"):
+            continue
+        for content in message.content:
+            text = getattr(content, "text", None)
+            if text:
+                texts.append(text)
+    return "\n\n".join(texts)
+
+
 _WAITING_FOR_CONFIRMATION = ConversationExecutionStatus.WAITING_FOR_CONFIRMATION
 
 
@@ -844,6 +875,7 @@ def stream_task(
     on_message: Callable[[Message], None] | None = None,
     on_confirm: ConfirmCallback | None = None,
     acceptance_checks: Sequence[AcceptanceCheck] | None = None,
+    on_awaiting_input: OnAwaitingInput | None = None,
 ) -> TaskOutcome:
     """Run a task, invoking `on_message` with each message as it's produced,
     and return the terminal `TaskOutcome` once verification has settled.
@@ -853,15 +885,22 @@ def stream_task(
     is only consulted when `cfg.confirm_mode == "always"` (see
     `_run_with_confirmation`); `cli.py` supplies a real terminal-prompting
     implementation, `server.py` leaves it unset. `acceptance_checks` is
-    entirely optional — see `_apply_acceptance_checks`.
+    entirely optional — see `_apply_acceptance_checks`. `on_awaiting_input`
+    is only consulted when `cfg.interactive` is true, and only around the
+    *initial* run — see the interactive loop below and ROADMAP.md's
+    decisions log for why task_tracker/verification retries stay fully
+    autonomous even in interactive mode.
     """
     if cfg is None:
         cfg = load_config()
     emit = on_message or (lambda _msg: None)
+    checkpoint_buffer: list[Message] = []
 
     def on_event(event: Event) -> None:
         if isinstance(event, LLMConvertibleEvent):
-            emit(event.to_llm_message())
+            message = event.to_llm_message()
+            checkpoint_buffer.append(message)
+            emit(message)
 
     with build_workspace(cfg) as workspace:
         conversation = Conversation(
@@ -891,6 +930,34 @@ def stream_task(
         conversation.send_message(task)
         run_result = _run_with_confirmation(conversation, cfg, emit, on_confirm, deadline)
         outcome = _outcome_for_run_result(run_result, task, cfg)
+
+        # HARNESS_INTERACTIVE=yes, initial run only (see stream_task's
+        # docstring and ROADMAP.md's decisions log): the SDK can't tell a
+        # genuine clarifying question apart from real completion — both set
+        # execution_status = FINISHED identically (see agent.py's
+        # _AUTONOMOUS_SUFFIX docstring) — so rather than guessing, always
+        # offer the human a checkpoint here and let them decide. Has no
+        # effect without a caller-supplied on_awaiting_input (server.py
+        # never supplies one; cfg.interactive alone is not enough).
+        while (
+            outcome is None
+            and cfg.interactive
+            and on_awaiting_input is not None
+            and conversation.state.execution_status == ConversationExecutionStatus.FINISHED
+        ):
+            narrative = _narrative_text(checkpoint_buffer)
+            checkpoint_buffer.clear()
+            wait_started = time.monotonic()
+            reply = on_awaiting_input(narrative)
+            # Time spent waiting on the human doesn't count against the
+            # shared task budget — only actual agent run time should.
+            deadline += time.monotonic() - wait_started
+            if not reply:
+                break
+            conversation.send_message(reply)
+            run_result = _run_with_confirmation(conversation, cfg, emit, on_confirm, deadline)
+            outcome = _outcome_for_run_result(run_result, task, cfg)
+
         if outcome is None:
             outcome = _enforce_task_tracker_completion(
                 conversation, cfg, emit, task, on_confirm, deadline
@@ -905,6 +972,7 @@ def run_task(
     cfg: Config | None = None,
     on_confirm: ConfirmCallback | None = None,
     acceptance_checks: Sequence[AcceptanceCheck] | None = None,
+    on_awaiting_input: OnAwaitingInput | None = None,
 ) -> TaskResult:
     messages: list = []
     outcome = stream_task(
@@ -913,5 +981,6 @@ def run_task(
         on_message=messages.append,
         on_confirm=on_confirm,
         acceptance_checks=acceptance_checks,
+        on_awaiting_input=on_awaiting_input,
     )
     return TaskResult(messages, outcome)  # last message is the final assistant output

@@ -233,37 +233,27 @@ locally, per `CLAUDE.md`'s own working-style rule. A minimal workflow
 on push/PR) would catch a regression before it lands rather than relying
 on manual discipline every session.
 
-### 19. Optional interactive mode (`HARNESS_INTERACTIVE=yes` / `--interactive`), default off
-Today the harness is always fully autonomous: `agent.py`'s
-`_AUTONOMOUS_SUFFIX` explicitly tells every agent "there's no user to ask,
-proceed on your own judgment, only stop via `finish`" — necessary because
-`runner.py` calls `conversation.run()` once with nobody able to answer a
-follow-up, and (per `ROADMAP.md`'s Known Limitations) the SDK itself can't
-tell a genuine clarifying question apart from real completion — both a
-plain-text reply and a `finish` call set `execution_status = FINISHED`
-identically. That's the right default for unattended/CI use, but it means
-a human running the CLI interactively has no way to answer a question the
-agent would otherwise have asked, or to redirect it mid-task, without
-killing the run and starting a whole new task from scratch.
-
-Proposed shape, opt-in only (current behavior stays the default exactly as
-today): a new flag (`HARNESS_INTERACTIVE` / CLI `--interactive`) that, when
-set, (a) drops `_AUTONOMOUS_SUFFIX` from the system prompt so the agent is
-allowed to pause and ask instead of being told to always push forward, and
-(b) has `cli.py` echo the agent's last message and prompt at the terminal
-whenever a run reaches `FINISHED`, giving the human a chance to type a
-reply (`conversation.send_message()` + `conversation.run()` again) or
-press Enter to end the task normally. Needs a UI-agnostic hook
-into `stream_task` (e.g. an optional `on_awaiting_input` callback) rather
-than reading `stdin` inside `runner.py` directly, since `runner.py` is also
-used by `server.py`, which has no terminal to prompt at — server mode would
-simply leave this unset and keep today's always-autonomous behavior
-regardless of the flag. Worth doing because it turns an existing, already-
-documented SDK-level ambiguity (can't tell "asking a question" from
-"actually done") from a workaround-only problem into a genuine, opt-in
-feature — but real design work (the callback shape, how much of the
-verification/task-tracker retry loops still apply once a human is in the
-loop) belongs in a proper plan before implementation, not a quick patch.
+### 19. ~~Optional interactive mode (`HARNESS_INTERACTIVE=yes` / `--interactive`), default off~~ — DONE
+Implemented per a plan reviewed with the user first (`EnterPlanMode` +
+`AskUserQuestion`, matching this item's own "real design work... before
+implementation" ask). Confirmed scope: the interactive checkpoint wraps
+only the *initial* `conversation.run()` — once the human ends the
+back-and-forth (or there was nothing to ask), the existing
+`_enforce_task_tracker_completion`/`_verify_and_report` retry loops proceed
+completely unchanged, still fully autonomous. `HARNESS_INTERACTIVE`
+(`Config.interactive`, default `False`) drops `agent.py`'s
+`_AUTONOMOUS_SUFFIX`; `runner.py`'s `stream_task`/`run_task` gained an
+`on_awaiting_input: Callable[[str], str | None]` parameter consulted only
+around that initial run; `cli.py`'s new `--interactive` flag wires a real
+terminal handler (`_prompt_for_continuation`, mirroring
+`_confirm_pending_actions`'s shape) — `server.py` supplies none, matching
+`HARNESS_CONFIRM_MODE=always`'s existing server-mode gotcha. Time spent
+waiting on the human's reply is excluded from `HARNESS_MAX_TASK_SECONDS`
+(the deadline is pushed forward by the wait duration). Verified live twice
+against a real LLM call: a single-round accept-and-finish, and a
+multi-round conversation where a typed follow-up made the agent create a
+second file in the same running conversation. See `ROADMAP.md`'s decisions
+log for the full design reasoning.
 
 ### 20. Unify timeout-safe verification for the agent-facing tool
 The harness-side verification pipeline's own `execute_check()` converts

@@ -18,6 +18,7 @@ reference — how to actually run and configure the thing.
 - [Setup](#setup)
 - [Configuration reference](#configuration-reference)
 - [CLI reference](#cli-reference)
+- [Interactive mode](#interactive-mode)
 - [Server mode (HTTP/WebSocket)](#server-mode-httpwebsocket)
 - [Task registry persistence](#task-registry-persistence)
 - [Projects: one subfolder per generated project](#projects-one-subfolder-per-generated-project)
@@ -81,6 +82,7 @@ template with every variable documented inline.
 | `HARNESS_VERIFY_TESTS` | `always` | `always` \| `never` — after the agent finishes, re-run the project's own tests and, if they fail, send the real failure back and let the agent retry. See [Test verification](#test-verification). |
 | `HARNESS_MAX_VERIFY_RETRIES` | `2` | How many automated fix-and-retry cycles `HARNESS_VERIFY_TESTS=always` allows before giving up. |
 | `HARNESS_MAX_TASK_SECONDS` | `1800` | Shared wall-clock budget (seconds) for one whole task — the initial run plus every task_tracker/verification retry combined, not just a single `conversation.run()` call. See [Task budget](#task-budget). |
+| `HARNESS_INTERACTIVE` | `no` | Allow the agent to pause and ask instead of always pushing forward autonomously. Only meaningful with the CLI's `--interactive` flag — see [Interactive mode](#interactive-mode). |
 | `HARNESS_TASK_STORE` | `memory` | `memory` \| `redis` \| `sqlite` \| `mysql` \| `postgres` — server-mode task registry backend, consulted only by `harness-server`/`harness-admin`. See [Task registry persistence](#task-registry-persistence). |
 | `HARNESS_TASK_TTL_SECONDS` | `0` | Seconds a completed/failed task record is kept before it's eligible for purge; `0` means keep forever. |
 | `HARNESS_TASK_STORE_SQLITE_PATH` | `./harness_tasks.db` | sqlite backend only. |
@@ -93,7 +95,7 @@ template with every variable documented inline.
 ```bash
 uv run python -m harness "<task>" [--execution {local,docker}] [--project NAME] \
     [--agents-md TEXT] [--model MODEL] [--api-key KEY] [--base-url URL] \
-    [--reasoning-effort LEVEL] [--require-verification] \
+    [--reasoning-effort LEVEL] [--interactive] [--require-verification] \
     [--acceptance-checks JSON_OR_FILE]
 ```
 
@@ -119,6 +121,9 @@ is installed via `uv pip install -e .`.)
   model at different reasoning-effort levels, to compare results. Any
   combination may be given; an omitted flag keeps `.env`'s value. See
   [Switching LLM provider / model](#switching-llm-provider--model).
+- `--interactive` — off by default. Allow the agent to pause and ask you a
+  question instead of always pushing forward on its own — see [Interactive
+  mode](#interactive-mode) below.
 - `--require-verification` — off by default. Treats an `inconclusive`
   verification result (nothing runnable confirmed the software works — an
   unknown project type, a missing required tool, a project with no tests
@@ -195,6 +200,56 @@ match an existing filename in the current directory will be read as that
 file's content instead of used literally — there's no override flag to force
 literal interpretation. Unlikely in practice (task descriptions are rarely
 also valid, existing filenames), but worth knowing.
+
+## Interactive mode
+
+By default the harness is fully autonomous: it's told there's no user
+available to ask a question, so it should make its best judgment call and
+keep working until the task is genuinely done (see `agent.py`'s
+`_AUTONOMOUS_SUFFIX` and [Known limitations](#known-limitations)). This
+exists because the SDK itself can't tell a genuine clarifying question apart
+from real completion — both set the same `FINISHED` status — so without this
+instruction the harness would have no way to tell whether the agent actually
+finished or just stopped to ask something nobody could answer.
+
+`--interactive` (`HARNESS_INTERACTIVE=yes` in `.env`, or the CLI flag —
+either way, off by default) turns that around for a human running the CLI:
+
+- The autonomous instruction is dropped, so the agent is free to pause and
+  ask instead of guessing and pushing forward.
+- Once the *initial* run reaches a normal stop, you're prompted at the
+  terminal with the agent's latest reply and a chance to type a follow-up
+  (sent back to the agent to continue the same conversation) or just press
+  Enter to accept it as done.
+- You can go back and forth as many times as you like — each reply
+  continues the same conversation, keeping everything the agent has already
+  done and learned.
+- Waiting for you to type doesn't spend the `HARNESS_MAX_TASK_SECONDS`
+  budget — the clock only runs while the agent itself is actually working,
+  not while a prompt is sitting at your terminal.
+
+```bash
+uv run harness --interactive "Scaffold a FastAPI service with a /health endpoint." --project my-api
+```
+
+**Scope: only the initial run is interactive.** Once you press Enter (or
+there was nothing to ask), the existing automated task_tracker-completion
+and test-verification retry loops take over exactly as they do without
+`--interactive` — fully autonomous, no further prompts, even if the agent
+asks a question again mid-fix-attempt. This keeps the feature small and its
+behavior predictable: the harness's own "keep re-checking and retrying
+automatically" loops are a different, already-established mechanism from a
+human being asked a question, and the two aren't mixed together.
+
+**Server mode doesn't support this.** `HARNESS_INTERACTIVE` is read from
+`.env` regardless of interface, but only `cli.py` supplies the terminal
+prompt that actually answers a checkpoint — `server.py` never does (no
+terminal to prompt at, same as `HARNESS_CONFIRM_MODE=always`'s existing
+server-mode gotcha). Setting `HARNESS_INTERACTIVE=yes` for a server
+deployment still drops the autonomous instruction from the prompt with
+nobody available to answer if the agent does ask something, which can leave
+a task less thoroughly finished than the default — leave this at `no` (the
+default) for `harness-server`.
 
 ## Server mode (HTTP/WebSocket)
 
@@ -1399,6 +1454,12 @@ uv run pytest -q
   **No authentication on any server-mode endpoint**, including this one —
   an OpenAI client sending an `Authorization` header has it silently
   ignored, not validated.
+- **`--interactive`'s checkpoint only covers the initial run** — see
+  [Interactive mode](#interactive-mode). If the agent asks a question again
+  during the automated task_tracker-completion or test-verification retry
+  loops, nobody is prompted; the harness's own automated follow-up message
+  is what continues the conversation, same as non-interactive mode. Not
+  supported by `server.py` at all (no terminal to prompt at).
 
 ## Troubleshooting
 

@@ -40,6 +40,20 @@ def _confirm_pending_actions(pending: Sequence[ActionEvent]) -> bool:
     return answer in ("y", "yes")
 
 
+def _prompt_for_continuation(narrative: str) -> str | None:
+    """Interactive terminal handler for `HARNESS_INTERACTIVE=yes`: prints
+    the agent's latest reply and lets the user type a follow-up, or press
+    Enter to accept it as done. The SDK can't tell a genuine clarifying
+    question apart from real completion (see agent.py's `_AUTONOMOUS_SUFFIX`
+    docstring), so this always offers the choice rather than guessing which
+    one just happened.
+    """
+    if narrative:
+        print(f"\n{narrative}\n")
+    reply = input("Your reply (Enter to finish the task): ").strip()
+    return reply or None
+
+
 def resolve_task_source(value: str) -> str:
     """Resolve the `task` argument to actual task text.
 
@@ -175,6 +189,20 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help=(
+            "Allow the agent to pause and ask you a question instead of "
+            "always pushing forward autonomously. When the initial run "
+            "reaches a normal stop, you'll be prompted at the terminal to "
+            "reply (continuing the task) or press Enter to accept it as "
+            "done. Only the initial run is interactive — the automated "
+            "task_tracker-completion and test-verification retry loops "
+            "that follow still run fully autonomously, same as today. Off "
+            "by default (current fully-autonomous behavior unchanged)."
+        ),
+    )
+    parser.add_argument(
         "--require-verification",
         action="store_true",
         help=(
@@ -237,6 +265,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.execution is not None:
         cfg = replace(cfg, execution=args.execution)
 
+    if args.interactive:
+        cfg = replace(cfg, interactive=True)
+
     if args.agents_md is not None and args.project is None:
         print("Error: --agents-md requires --project", file=sys.stderr)
         return 1
@@ -263,9 +294,14 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     on_confirm = _confirm_pending_actions if cfg.confirm_mode == "always" else None
+    on_awaiting_input = _prompt_for_continuation if cfg.interactive else None
     try:
         messages = run_task(
-            task, cfg=cfg, on_confirm=on_confirm, acceptance_checks=acceptance_checks
+            task,
+            cfg=cfg,
+            on_confirm=on_confirm,
+            acceptance_checks=acceptance_checks,
+            on_awaiting_input=on_awaiting_input,
         )
     except Exception as exc:  # noqa: BLE001 - surfaced as a clean CLI error, not a traceback
         print(f"Error: {exc}", file=sys.stderr)

@@ -41,7 +41,12 @@ build plan. This file is the living, evolving companion to that static plan.
   wall-clock budget `runner.py` enforces across every phase of one task —
   see "Decisions log" below for why this, not a reverse-engineered
   cumulative iteration count, closes the "one `HARNESS_MAX_ITERATIONS`
-  doesn't bound a whole task" gap.
+  doesn't bound a whole task" gap. `interactive` (from `HARNESS_INTERACTIVE`,
+  default `False`) opts into `runner.py`'s initial-run interactive
+  checkpoint and drops `agent.py`'s `_AUTONOMOUS_SUFFIX` — see the matching
+  entries below and decisions log for the confirmed scope (initial run
+  only) and why it has no effect without a caller-supplied
+  `on_awaiting_input`.
 - `acceptance.py` — optional, caller-supplied machine-checkable acceptance
   criteria for one specific task, evaluated by the harness after the run,
   never agent-facing or agent-defined. Deliberately scoped to two check
@@ -89,6 +94,10 @@ build plan. This file is the living, evolving companion to that static plan.
   treat skill guidance as never a substitute for actually running the
   checks it describes — see "Decisions log" below for why this no longer
   needs to name skills individually or reference `invoke_skill`.
+  `build_agent()` now includes `_AUTONOMOUS_SUFFIX` conditionally — omitted
+  when `cfg.interactive` is true, unconditional otherwise — every other
+  suffix stays unconditional regardless of interactive mode; see the
+  matching `runner.py` entry and decisions log.
 - `runner.py` — `stream_task()` (callback-per-message) is the shared primitive;
   `run_task()` wraps it for the CLI's collect-and-return use case. Also now
   wires `cfg.max_iterations` into `Conversation(max_iteration_per_run=...)`
@@ -156,7 +165,22 @@ build plan. This file is the living, evolving companion to that static plan.
   whichever later phases hadn't run yet — same short-circuit shape as
   `"confirmation_required"` and `"incomplete"`. See MANUAL.md "Task
   budget" and "Decisions log" below for why wall-clock was chosen over
-  reverse-engineering the SDK's internal per-call iteration count.
+  reverse-engineering the SDK's internal per-call iteration count. Also
+  now supports `HARNESS_INTERACTIVE=yes`'s initial-run checkpoint: a new
+  `OnAwaitingInput` callback (`Callable[[str], str | None]`, next to the
+  pre-existing `ConfirmCallback`), consulted only around the *initial*
+  `conversation.run()` (see MANUAL.md "Interactive mode" and decisions log
+  for the confirmed scope) — once it reaches a normal `FINISHED` status,
+  `stream_task` loops: build the narrative text produced since the last
+  checkpoint (`_narrative_text()`, a small local copy of `server.py`'s
+  `_narrative_texts` — kept separate since `server.py` depends on this
+  module, not the reverse), call the callback, and either end the loop
+  (falsy return) or `send_message()`/re-run with it. `deadline` is
+  extended by the wall-clock time spent inside the callback before the
+  next `_run_with_confirmation` call, so time spent waiting on a human
+  reply is never charged against `HARNESS_MAX_TASK_SECONDS`. Has no effect
+  without a caller-supplied callback — `cli.py` supplies one, `server.py`
+  never does.
 - `custom_tools/run_tests_tool.py` — a language-neutral verification
   pipeline in four explicit, independently-tested stages: **project
   detection** (`detect_project()`, one marker-file walk covering Python/
@@ -195,7 +219,7 @@ build plan. This file is the living, evolving companion to that static plan.
   silently picking one candidate project by directory-walk order — see the
   matching decisions-log entry.
 - `cli.py` — `python -m harness "<task>" [--execution] [--project] [--agents-md]
-  [--model] [--api-key] [--base-url] [--reasoning-effort]
+  [--model] [--api-key] [--base-url] [--reasoning-effort] [--interactive]
   [--require-verification] [--acceptance-checks]`. `task` is resolved via
   `resolve_task_source()`: http(s) URL (fetched) or an existing local file
   (read) take precedence over literal text. CLI-only — server mode's `task`
@@ -212,6 +236,11 @@ build plan. This file is the living, evolving companion to that static plan.
   resolves `task` (minus the URL-fetch case), parses the JSON via
   `acceptance.parse_acceptance_checks()`, and reports any error as a
   `Configuration error: ...` before `run_task` is ever called.
+  `--interactive` (off by default) sets `cfg.interactive=True` and passes
+  `_prompt_for_continuation` (an `input()`-based terminal handler,
+  mirroring `_confirm_pending_actions`'s self-contained print+prompt shape)
+  as `run_task`'s `on_awaiting_input` — the CLI-only half of
+  `runner.py`'s interactive checkpoint; `server.py` never supplies one.
 - `workspace.py` — single dispatch point for execution backends
   (`build_workspace(cfg)`); `local` returns a plain path, `docker` returns a
   `DockerWorkspace`, both as context managers so cleanup is automatic.
@@ -404,7 +433,11 @@ build plan. This file is the living, evolving companion to that static plan.
   instruction, not an SDK-enforced constraint) — **status: fixes for symptoms
   (1) and (2) applied but not yet re-verified live** (see backlog:
   harness-side task_tracker-completion enforcement, considered and deferred
-  in favor of trying the prompt fix first).
+  in favor of trying the prompt fix first). `HARNESS_INTERACTIVE=yes` (see
+  "What's implemented" above) is the opt-in escape hatch for a human running
+  the CLI: it deliberately drops `_AUTONOMOUS_SUFFIX` and, exploiting the
+  exact ambiguity described here, always offers a terminal checkpoint at
+  `FINISHED` rather than trying to guess which of the two this actually was.
 - **A related but distinct "agent assumes a human is present" failure: it
   runs a CLI tool that prompts interactively, the prompt silently
   auto-cancels with no TTY/human to answer it (often still exit code 0, no
@@ -1902,3 +1935,76 @@ build plan. This file is the living, evolving companion to that static plan.
     "inconclusive"` with a single `unavailable` check naming both
     candidate paths and languages by their real absolute paths — not
     simulated, an actual two-project directory tree on disk.
+- **Opt-in interactive mode (`HARNESS_INTERACTIVE`/`--interactive`): the
+  checkpoint wraps only the *initial* run, not the automated
+  task_tracker/verify retry loops — confirmed with the user via
+  `AskUserQuestion` before implementing, per the todo item's own explicit
+  request for "real design work... before implementation, not a quick
+  patch."** Two shapes were on the table: (a) a checkpoint only around the
+  initial `conversation.run()`, or (b) a checkpoint at every point any of
+  the three call sites (initial run, task_tracker retries, verify retries)
+  reaches `FINISHED`. Chose (a) — the smallest change that covers the two
+  concrete failure modes already on record (a clarifying question, a
+  premature "done" claim, both from the *initial* run in every real
+  repro logged in this file), without threading a new callback through
+  `_enforce_task_tracker_completion`/`_verify_and_report` or deciding how
+  a human's reply should interleave with the harness's own automated
+  "your tests are still failing, fix them" follow-up inside those loops —
+  a real design question (b) would raise that (a) sidesteps entirely by
+  leaving those two loops completely untouched.
+  - **Callback shape: `OnAwaitingInput = Callable[[str], str | None]`** —
+    takes the narrative text since the last checkpoint, returns the human's
+    reply or a falsy value to end the loop. Mirrors `ConfirmCallback`/
+    `_confirm_pending_actions`'s existing self-contained "receives what it
+    needs, does its own printing and prompting" shape rather than a
+    zero-arg callback that would have required `cli.py` to also wire live
+    message-streaming just for this (`run_task`'s collect-and-return shape
+    stays untouched).
+  - **`_narrative_text()` is a separate, small copy of `server.py`'s
+    `_narrative_texts`, not a shared import** — `server.py` depends on
+    `runner.py`, not the other way around, so importing it the other
+    direction would be a real layering violation, not just a style
+    preference; ~15 duplicated lines is the correct trade here (same "three
+    similar lines over a premature/backwards abstraction" call made
+    elsewhere in this file for `acceptance.py`'s path-containment logic).
+  - **`HARNESS_MAX_TASK_SECONDS` is paused while blocked on the human's
+    reply, not spent by it** — `deadline` is pushed forward by the exact
+    wall-clock time spent inside `on_awaiting_input()` before the next
+    `_run_with_confirmation` call. Without this, a real back-and-forth
+    conversation could exhaust the shared task budget purely from a human
+    taking their time to type, which has nothing to do with what the
+    budget exists to bound (runaway *agent* execution — see the matching
+    decisions-log entry above). Verified with a fake clock that only
+    advances when explicitly told to (not a fixed-value iterator sequence,
+    which would be brittle to the exact number of `time.monotonic()` calls
+    a refactor might add or remove): a simulated "wait" of 999 seconds
+    against a 5-second `HARNESS_MAX_TASK_SECONDS` still completes normally
+    instead of reporting `budget_exhausted`.
+  - **Checkpoint fires only when `execution_status == FINISHED`** — not
+    `STUCK`/`ERROR`, which already produce their own outcome via the
+    existing aborted-status handling; interactive mode doesn't change how
+    those are handled at all.
+  - **No new system-prompt suffix was added — only `_AUTONOMOUS_SUFFIX` is
+    dropped when `cfg.interactive` is true, exactly matching the todo
+    item's own proposed shape** (drop (a), wire the terminal loop (b)).
+    Every other suffix (`_README_SUFFIX`, `_NONINTERACTIVE_TOOLING_SUFFIX`,
+    `_VERIFY_BEFORE_FINISH_SUFFIX`, `_LIFECYCLE_SKILLS_SUFFIX`) stays
+    unconditional — none of them are about whether a human is present,
+    they're independent policies.
+  - **`HARNESS_INTERACTIVE` has no effect without a caller-supplied
+    `on_awaiting_input`** — only `cli.py` wires one; `server.py` doesn't
+    (no terminal to prompt at), the same gap `HARNESS_CONFIRM_MODE=always`
+    already has for server mode. Setting the flag anyway still drops the
+    autonomous nudge with nobody available to answer if the agent does ask
+    something — documented plainly in MANUAL.md as a foot-gun rather than
+    silently guarded against, matching the existing confirm-mode precedent.
+  - Verified live, twice, against a real LLM call (not just unit tests):
+    (1) a single-round task where pressing Enter immediately after the
+    first `finish` proceeded straight to the existing autonomous
+    verification flow, unchanged; (2) a multi-round conversation where a
+    typed follow-up ("also create a second file...") was sent back to the
+    same running conversation, which then created the second file and
+    finished again, prompting a second time — confirming the interactive
+    loop preserves full conversation context across replies rather than
+    starting fresh. Also verified the default (`--interactive` omitted)
+    behaves byte-for-byte as before: no prompt, same autonomous flow.

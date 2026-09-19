@@ -310,6 +310,177 @@ def test_stream_task_short_circuits_when_confirmation_required_with_no_handler(m
     assert tracker_calls["count"] == 0  # never reached task_tracker enforcement
 
 
+# --- HARNESS_INTERACTIVE=yes: initial-run interactive checkpoint -----------
+
+
+class _ManualClock:
+    """A fake `time.monotonic` that only advances when explicitly told to —
+    avoids needing to predict the exact number of `time.monotonic()` calls a
+    code path makes (fragile), unlike a fixed-value iterator.
+    """
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _mock_task_tracker_and_verify(monkeypatch, verification_state: str = "verified") -> None:
+    monkeypatch.setattr(runner, "_enforce_task_tracker_completion", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        runner,
+        "_verify_and_report",
+        lambda *a, **kw: runner.TaskOutcome(
+            verification_state=verification_state,
+            completion_contract=runner.CompletionContract(
+                goal="", acceptance_criteria=[], verification_checks=[], limitations=[]
+            ),
+        ),
+    )
+
+
+def test_interactive_loop_sends_reply_and_reruns_until_enter(monkeypatch):
+    conversation = _FakeConversation(
+        statuses_after_run=[
+            ConversationExecutionStatus.FINISHED,  # initial run
+            ConversationExecutionStatus.FINISHED,  # after the human's reply
+        ]
+    )
+    monkeypatch.setattr(runner, "Conversation", lambda **_kwargs: conversation)
+    monkeypatch.setattr(runner, "build_agent", lambda cfg: "fake-agent")
+    monkeypatch.setattr(runner, "build_workspace", lambda cfg: nullcontext("fake-workspace"))
+    _mock_task_tracker_and_verify(monkeypatch, verification_state="inconclusive")
+    replies = iter(["please also add tests", None])
+    prompted = []
+
+    def on_awaiting_input(narrative: str) -> str | None:
+        prompted.append(narrative)
+        return next(replies)
+
+    outcome = runner.stream_task(
+        "do the thing", cfg=_cfg(interactive=True), on_awaiting_input=on_awaiting_input
+    )
+
+    assert conversation.run_calls == 2
+    assert conversation.sent_messages == ["do the thing", "please also add tests"]
+    assert len(prompted) == 2
+    assert outcome.verification_state == "inconclusive"
+
+
+def test_interactive_loop_ends_immediately_on_enter_and_proceeds_normally(monkeypatch):
+    conversation = _FakeConversation(statuses_after_run=[ConversationExecutionStatus.FINISHED])
+    monkeypatch.setattr(runner, "Conversation", lambda **_kwargs: conversation)
+    monkeypatch.setattr(runner, "build_agent", lambda cfg: "fake-agent")
+    monkeypatch.setattr(runner, "build_workspace", lambda cfg: nullcontext("fake-workspace"))
+    tracker_calls = {"count": 0}
+
+    def _count_tracker(*_a, **_kw):
+        tracker_calls["count"] += 1
+
+    _mock_task_tracker_and_verify(monkeypatch)
+    monkeypatch.setattr(runner, "_enforce_task_tracker_completion", _count_tracker)
+    prompted = []
+
+    def on_awaiting_input(narrative: str) -> str | None:
+        prompted.append(narrative)
+        return None
+
+    runner.stream_task(
+        "do the thing", cfg=_cfg(interactive=True), on_awaiting_input=on_awaiting_input
+    )
+
+    assert conversation.run_calls == 1
+    assert len(prompted) == 1
+    assert tracker_calls["count"] == 1  # proceeded to the normal autonomous flow afterward
+
+
+def test_interactive_without_a_callback_never_loops(monkeypatch):
+    # HARNESS_INTERACTIVE=yes with no on_awaiting_input (e.g. server.py,
+    # which never supplies one) must behave like a single ordinary run —
+    # regression guard for the documented server-mode gotcha.
+    conversation = _FakeConversation(statuses_after_run=[ConversationExecutionStatus.FINISHED])
+    monkeypatch.setattr(runner, "Conversation", lambda **_kwargs: conversation)
+    monkeypatch.setattr(runner, "build_agent", lambda cfg: "fake-agent")
+    monkeypatch.setattr(runner, "build_workspace", lambda cfg: nullcontext("fake-workspace"))
+    _mock_task_tracker_and_verify(monkeypatch, verification_state="inconclusive")
+
+    runner.stream_task("do the thing", cfg=_cfg(interactive=True), on_awaiting_input=None)
+
+    assert conversation.run_calls == 1
+
+
+def test_interactive_false_ignores_a_supplied_callback(monkeypatch):
+    conversation = _FakeConversation(statuses_after_run=[ConversationExecutionStatus.FINISHED])
+    monkeypatch.setattr(runner, "Conversation", lambda **_kwargs: conversation)
+    monkeypatch.setattr(runner, "build_agent", lambda cfg: "fake-agent")
+    monkeypatch.setattr(runner, "build_workspace", lambda cfg: nullcontext("fake-workspace"))
+    _mock_task_tracker_and_verify(monkeypatch, verification_state="inconclusive")
+
+    def _fail_if_called(_narrative: str) -> str | None:
+        raise AssertionError("on_awaiting_input must not be called when cfg.interactive is False")
+
+    runner.stream_task(
+        "do the thing", cfg=_cfg(interactive=False), on_awaiting_input=_fail_if_called
+    )
+
+    assert conversation.run_calls == 1
+
+
+def test_interactive_loop_does_not_trigger_on_a_stuck_status(monkeypatch):
+    conversation = _FakeConversation(statuses_after_run=[ConversationExecutionStatus.STUCK])
+    monkeypatch.setattr(runner, "Conversation", lambda **_kwargs: conversation)
+    monkeypatch.setattr(runner, "build_agent", lambda cfg: "fake-agent")
+    monkeypatch.setattr(runner, "build_workspace", lambda cfg: nullcontext("fake-workspace"))
+
+    def _fail_if_called(_narrative: str) -> str | None:
+        raise AssertionError("on_awaiting_input must not be called on a stuck/error status")
+
+    outcome = runner.stream_task(
+        "do the thing", cfg=_cfg(interactive=True), on_awaiting_input=_fail_if_called
+    )
+
+    assert outcome.verification_state == "stuck"
+    assert conversation.run_calls == 1
+
+
+def test_interactive_wait_time_is_excluded_from_the_task_budget(monkeypatch):
+    # A human can take arbitrarily long to reply without the shared
+    # HARNESS_MAX_TASK_SECONDS budget being spent on that wait — only actual
+    # agent run time should count. Proven by simulating a "wait" many times
+    # longer than the whole configured budget and confirming the task still
+    # completes normally instead of reporting budget_exhausted.
+    conversation = _FakeConversation(
+        statuses_after_run=[
+            ConversationExecutionStatus.FINISHED,
+            ConversationExecutionStatus.FINISHED,
+        ]
+    )
+    monkeypatch.setattr(runner, "Conversation", lambda **_kwargs: conversation)
+    monkeypatch.setattr(runner, "build_agent", lambda cfg: "fake-agent")
+    monkeypatch.setattr(runner, "build_workspace", lambda cfg: nullcontext("fake-workspace"))
+    _mock_task_tracker_and_verify(monkeypatch, verification_state="verified")
+    clock = _ManualClock()
+    monkeypatch.setattr(runner.time, "monotonic", clock)
+    replies = iter(["keep going", None])
+
+    def on_awaiting_input(_narrative: str) -> str | None:
+        clock.advance(999.0)  # far longer than max_task_seconds below
+        return next(replies)
+
+    outcome = runner.stream_task(
+        "do the thing",
+        cfg=_cfg(interactive=True, max_task_seconds=5),
+        on_awaiting_input=on_awaiting_input,
+    )
+
+    assert conversation.run_calls == 2
+    assert outcome.verification_state == "verified"
+
+
 # --- HARNESS_MAX_TASK_SECONDS: shared task-level budget ---------------------
 #
 # Regression coverage for the gap logged in ROADMAP.md: HARNESS_MAX_ITERATIONS

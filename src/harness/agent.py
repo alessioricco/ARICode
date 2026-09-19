@@ -145,6 +145,22 @@ _LIFECYCLE_SKILLS_SUFFIX = (
 
 
 def build_agent(cfg: Config) -> Agent:
+    # HARNESS_INTERACTIVE=yes (cfg.interactive) drops _AUTONOMOUS_SUFFIX so
+    # the agent may pause/ask instead of being told to always push forward
+    # — the terminal-loop half that answers a question when it does is
+    # runner.py's stream_task interactive checkpoint, not anything here.
+    # Every other suffix stays unconditional: none of them are about "is a
+    # human present," they're independent policies (README requirement,
+    # non-interactive tool flags, verify-before-finish, lifecycle skills).
+    suffixes = [_AUTONOMOUS_SUFFIX] if not cfg.interactive else []
+    suffixes.extend(
+        [
+            _README_SUFFIX,
+            _NONINTERACTIVE_TOOLING_SUFFIX,
+            _VERIFY_BEFORE_FINISH_SUFFIX,
+            _LIFECYCLE_SKILLS_SUFFIX,
+        ]
+    )
     agent_context = AgentContext(
         skills=load_skill_catalog(cfg.skills_dir),
         # Resolved lazily by the Conversation once the real workspace path is
@@ -152,11 +168,7 @@ def build_agent(cfg: Config) -> Agent:
         # a project's AGENTS.md / .agents/skills/ (see skills.write_project_context)
         # apply automatically, on top of the shared catalog above.
         load_project_skills=True,
-        system_message_suffix=(
-            f"{_AUTONOMOUS_SUFFIX}\n\n{_README_SUFFIX}\n\n"
-            f"{_NONINTERACTIVE_TOOLING_SUFFIX}\n\n{_VERIFY_BEFORE_FINISH_SUFFIX}\n\n"
-            f"{_LIFECYCLE_SKILLS_SUFFIX}"
-        ),
+        system_message_suffix="\n\n".join(suffixes),
     )
     agent = Agent(llm=build_llm(cfg), tools=build_tools(), agent_context=agent_context)
     # HARNESS_CONFIRM_MODE == "always" should attach a confirmation policy that
