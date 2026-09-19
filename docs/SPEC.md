@@ -1,4 +1,4 @@
-# Build Spec — AriCode on the OpenHands SDK
+# Build Spec — ARICode on the OpenHands SDK
 
 The canonical build plan for this repo. Claude Code implements it milestone by
 milestone (section 11). Project memory and guardrails are in ../CLAUDE.md.

@@ -2390,14 +2390,14 @@ build plan. This file is the living, evolving companion to that static plan.
   - MANUAL.md's "Skills" section now says plainly that these three aren't
     shipped and points at `github.com/anthropics/skills` for anyone who
     wants to add them back locally themselves.
-- **Project renamed `coding-agent-harness` → AriCode — branding only, not
+- **Project renamed `coding-agent-harness` → ARICode — branding only, not
   the importable package.** User explicitly chose the shallowest of three
   scoped options after being asked directly (repo/package/CLI/env-var
   depth all carry different risk): the GitHub repo, the PyPI-style
   distribution name (`pyproject.toml`'s `name`), the Docker image tag
   (`DEFAULT_DOCKER_IMAGE`/`HARNESS_DOCKER_IMAGE`'s default value),
   `server.py`'s FastAPI `title` and `/v1/models` `owned_by` string, and
-  doc/prose titles all changed to `aricode`/AriCode. Deliberately
+  doc/prose titles all changed to `aricode`/ARICode. Deliberately
   unchanged: `import harness`, `python -m harness`, every `HARNESS_*`
   env var, and the `harness-admin` console script — standard PyPI
   practice (a distribution name can differ from its import name), and it
@@ -2412,5 +2412,5 @@ build plan. This file is the living, evolving companion to that static plan.
   name) to stop reporting the old name. Verified live end-to-end after
   every change: full suite (552 passed), `python -m harness --help`
   unaffected, `harness-admin --help` unaffected, and a real `FastAPI`
-  app instantiated via `create_app()` showing `title == "AriCode"` and a
+  app instantiated via `create_app()` showing `title == "ARICode"` and a
   live `/v1/models` response showing `owned_by == "aricode"`.

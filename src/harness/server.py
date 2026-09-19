@@ -189,7 +189,7 @@ def create_app():
         yield
         store.close()
 
-    app = FastAPI(title="AriCode", lifespan=_lifespan)
+    app = FastAPI(title="ARICode", lifespan=_lifespan)
 
     if startup_cfg.task_ttl_seconds > 0:
 

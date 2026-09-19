@@ -1,4 +1,4 @@
-# CLAUDE.md — AriCode
+# CLAUDE.md — ARICode
 
 Project memory for Claude Code. Read this first, every session.
 
