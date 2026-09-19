@@ -1071,7 +1071,7 @@ live in `src/harness/custom_tools/`:
 
   | Language | Primary check | Secondary checks (only if configured) |
   |---|---|---|
-  | Python | `pytest -q` | `ruff check .` (`[tool.ruff]` or `ruff.toml`/`.ruff.toml`); `mypy .` (`[tool.mypy]` or `mypy.ini`/`.mypy.ini`); **always**, if any `.py` file at the project root has an `if __name__ == "__main__":` guard: `entrypoint-ordering` (a static AST check, no subprocess — see below) and `python <entry point>` (actually runs it, stdin closed) |
+  | Python | `pytest -q` | `ruff check .` (`[tool.ruff]` or `ruff.toml`/`.ruff.toml`); `mypy .` (`[tool.mypy]` or `mypy.ini`/`.mypy.ini`); **always**, for any `.py` file with an `if __name__ == "__main__":` guard, found by a depth-bounded recursive scan (same depth bound and vendor/build-directory skip list as project detection, plus the project's own `tests`/`test` directory — see below): `entrypoint-ordering` (a static AST check, no subprocess — see below) and `python <entry point>` (actually runs it, stdin closed) |
   | Node/JS/TS | `npm run build` if defined, else `npm test` if a real (non-placeholder) `scripts.test` exists | whichever of `scripts.test`/`scripts.lint`/`scripts.typecheck`(`-type-check`) aren't already primary |
   | Go | `go test ./...` | `go vet ./...` |
   | Rust | `cargo test` | `cargo check`; `cargo clippy` |
@@ -1105,6 +1105,20 @@ live in `src/harness/custom_tools/`:
     handle closed/absent stdin gracefully (an uncaught `EOFError` on the
     first prompt) will show up here as a failure too — a real, if narrower,
     finding, not a false positive.
+
+  Entry-point discovery walks the whole project tree, not just its root
+  directory — a scaffolded project's real code can land a level or two
+  below the given root (confirmed live: `npm create vite@latest ...`
+  nests the app under `<project>/<name>/<name>/`, and the same shape
+  turns up in Python scaffolds too). It skips the same vendor/build
+  directories as project detection (`node_modules`, `.git`, `.venv`,
+  `dist`, `vendor`, ...) plus the project's own `tests`/`test` directory —
+  a test script with its own `if __name__ == "__main__": unittest.main()`
+  is not the program's entry point — and is bounded to the same depth as
+  project detection to avoid a full tree walk on a large workspace. A
+  root-level entry point's reported path is unchanged (a bare filename,
+  e.g. `hanoi.py`); a nested one is reported relative to the project root
+  (e.g. `src/app/main.py`).
 
   A configured tool that isn't installed (ruff/mypy/npm/go/cargo/mvn/gradle
   missing) is reported as a limitation, not a failure. See [Test

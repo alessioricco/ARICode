@@ -655,29 +655,53 @@ def _is_main_guard(node: ast.stmt) -> bool:
     )
 
 
+# Directories entry-point discovery skips beyond the usual _SKIP_DIRS
+# (vendored/build output): a project's own tests directory. Recursing at
+# all was deliberately deferred until there was a real reason to (see
+# ROADMAP.md's decisions log) specifically because an unfiltered walk
+# risks two kinds of false positive — a vendored dependency's own
+# `__main__` guard (already covered by _SKIP_DIRS) and a test *script*
+# that happens to define one too (e.g. `if __name__ == "__main__":
+# unittest.main()`), which is not "the program's own entry point" in the
+# sense this check cares about.
+_ENTRYPOINT_SKIP_DIRS = _SKIP_DIRS | {"tests", "test"}
+
+
 def _find_python_entrypoints(root: str) -> list[str]:
-    """`.py` filenames directly in `root` whose top level contains a
-    `if __name__ == "__main__":` guard — deliberately not recursive (an
-    "entry point" is expected at the project root for the kind of small
-    generated project this harness verifies) and skips a file that fails to
-    parse (a real syntax error surfaces via pytest collection instead)."""
-    entrypoints = []
-    try:
-        entries = sorted(os.listdir(root))
-    except OSError:
-        return []
-    for name in entries:
-        if not name.endswith(".py"):
+    """`.py` files under `root` whose top level contains a
+    `if __name__ == "__main__":` guard — recursive, but depth-bounded
+    (`_MAX_SCAN_DEPTH`, the same bound `detect_project()` uses: a
+    scaffolded project's real code can land a level or two below the given
+    root) and skipping known vendor/build directories plus a project's own
+    tests directory (`_ENTRYPOINT_SKIP_DIRS`) — recursion without those
+    exclusions would risk matching an unrelated `__main__` guard inside a
+    vendored dependency or a test script, not the program's own entry
+    point. Returns paths relative to `root` (a bare filename for a
+    root-level entry point, unchanged from before this was recursive), so
+    callers can `os.path.join(root, name)` or run `python <name>` with
+    `cwd=root` exactly as they already do. Skips a file that fails to parse
+    (a real syntax error surfaces via pytest collection instead).
+    """
+    entrypoints: list[str] = []
+    base_depth = root.rstrip(os.sep).count(os.sep)
+    for current_root, dirs, files in os.walk(root):
+        depth = current_root.rstrip(os.sep).count(os.sep) - base_depth
+        if depth >= _MAX_SCAN_DEPTH:
+            dirs[:] = []
             continue
-        path = os.path.join(root, name)
-        try:
-            with open(path, encoding="utf-8") as f:
-                tree = ast.parse(f.read(), filename=path)
-        except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
-            continue
-        if any(_is_main_guard(node) for node in tree.body):
-            entrypoints.append(name)
-    return entrypoints
+        dirs[:] = [d for d in dirs if d not in _ENTRYPOINT_SKIP_DIRS and not d.startswith(".")]
+        for name in files:
+            if not name.endswith(".py"):
+                continue
+            path = os.path.join(current_root, name)
+            try:
+                with open(path, encoding="utf-8") as f:
+                    tree = ast.parse(f.read(), filename=path)
+            except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
+                continue
+            if any(_is_main_guard(node) for node in tree.body):
+                entrypoints.append(os.path.relpath(path, root))
+    return sorted(entrypoints)
 
 
 def _entrypoint_ordering_spec(root: str, entrypoints: list[str]) -> CheckSpec | None:

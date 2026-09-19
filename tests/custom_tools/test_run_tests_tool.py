@@ -9,6 +9,7 @@ else exercised via constructed `CheckSpec`s or monkeypatched `shutil.which`.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 
@@ -751,6 +752,98 @@ def test_find_python_entrypoints_ignores_files_that_do_not_parse(tmp_path):
 
 def test_find_python_entrypoints_empty_directory(tmp_path):
     assert _find_python_entrypoints(str(tmp_path)) == []
+
+
+def test_find_python_entrypoints_finds_a_nested_one(tmp_path):
+    nested = tmp_path / "src" / "app"
+    nested.mkdir(parents=True)
+    (nested / "main.py").write_text("if __name__ == '__main__':\n    pass\n")
+
+    entrypoints = _find_python_entrypoints(str(tmp_path))
+
+    assert entrypoints == [os.path.join("src", "app", "main.py")]
+
+
+def test_find_python_entrypoints_finds_both_root_and_nested(tmp_path):
+    (tmp_path / "cli.py").write_text("if __name__ == '__main__':\n    pass\n")
+    nested = tmp_path / "src"
+    nested.mkdir()
+    (nested / "main.py").write_text("if __name__ == '__main__':\n    pass\n")
+
+    entrypoints = _find_python_entrypoints(str(tmp_path))
+
+    assert entrypoints == sorted(["cli.py", os.path.join("src", "main.py")])
+
+
+def test_find_python_entrypoints_skips_vendored_dependencies(tmp_path):
+    vendored = tmp_path / "vendor" / "some_lib"
+    vendored.mkdir(parents=True)
+    (vendored / "__main__.py").write_text("if __name__ == '__main__':\n    pass\n")
+
+    assert _find_python_entrypoints(str(tmp_path)) == []
+
+
+def test_find_python_entrypoints_skips_node_modules_and_venv(tmp_path):
+    for skipped in ("node_modules", ".venv", "venv", "__pycache__"):
+        d = tmp_path / skipped / "pkg"
+        d.mkdir(parents=True)
+        (d / "cli.py").write_text("if __name__ == '__main__':\n    pass\n")
+
+    assert _find_python_entrypoints(str(tmp_path)) == []
+
+
+def test_find_python_entrypoints_skips_the_tests_directory(tmp_path):
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_cli.py").write_text(
+        "if __name__ == '__main__':\n    import unittest\n    unittest.main()\n"
+    )
+
+    assert _find_python_entrypoints(str(tmp_path)) == []
+
+
+def test_find_python_entrypoints_skips_hidden_directories(tmp_path):
+    hidden = tmp_path / ".git" / "hooks"
+    hidden.mkdir(parents=True)
+    (hidden / "pre-commit.py").write_text("if __name__ == '__main__':\n    pass\n")
+
+    assert _find_python_entrypoints(str(tmp_path)) == []
+
+
+def test_find_python_entrypoints_respects_the_max_scan_depth(tmp_path):
+    deep = tmp_path
+    for i in range(6):
+        deep = deep / f"level{i}"
+    deep.mkdir(parents=True)
+    (deep / "buried.py").write_text("if __name__ == '__main__':\n    pass\n")
+
+    assert _find_python_entrypoints(str(tmp_path)) == []
+
+
+def test_entrypoint_ordering_spec_checks_a_nested_entrypoint(tmp_path):
+    nested = tmp_path / "src"
+    nested.mkdir()
+    (nested / "main.py").write_text(_ORDERING_BUG_SOURCE)
+
+    entrypoints = _find_python_entrypoints(str(tmp_path))
+    spec = _entrypoint_ordering_spec(str(tmp_path), entrypoints)
+
+    assert spec is not None
+    assert spec.precomputed.status == "failed"
+    assert "helper" in spec.precomputed.output
+
+
+def test_python_plan_smoke_run_command_uses_the_relative_nested_path(tmp_path):
+    nested = tmp_path / "src"
+    nested.mkdir()
+    (nested / "main.py").write_text("if __name__ == '__main__':\n    pass\n")
+
+    specs = _python_plan(str(tmp_path))
+
+    smoke_specs = [s for s in specs if s.name.startswith("python ")]
+    assert len(smoke_specs) == 1
+    assert smoke_specs[0].command[-1] == os.path.join("src", "main.py")
+    assert smoke_specs[0].cwd == str(tmp_path)
 
 
 def test_entrypoint_ordering_spec_is_none_without_any_entrypoint(tmp_path):

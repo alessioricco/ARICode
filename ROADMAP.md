@@ -1813,14 +1813,55 @@ build plan. This file is the living, evolving companion to that static plan.
     actually needed it. Consistent with the same "no human is available to
     answer a prompt" principle `agent.py`'s `_NONINTERACTIVE_TOOLING_SUFFIX`
     already applies to the agent's own tool calls.
-  - **Entry points are looked for only at the Python project's root
-    directory, not recursively.** Matches the kind of small, single-script
-    generated project this harness actually verifies (confirmed by every
-    live repro in this file so far); a deeper search would risk picking up
-    an unrelated `__main__` guard in, say, a vendored dependency or an
-    example script, and adds real cost (another tree walk) for a case not
-    yet observed in practice. Documented as a real scope limit, revisitable
-    if a nested-entry-point project is ever actually seen.
+  - **Entry points were originally looked for only at the Python project's
+    root directory, not recursively — since revisited (see the "Recursive
+    entry-point discovery" entry below).** Matches the kind of small,
+    single-script generated project this harness actually verified at the
+    time (confirmed by every live repro in this file so far); a deeper
+    search would risk picking up an unrelated `__main__` guard in, say, a
+    vendored dependency or an example script, and adds real cost (another
+    tree walk) for a case not yet observed in practice. Documented as a
+    real scope limit, revisitable if a nested-entry-point project is ever
+    actually seen.
+- **Recursive entry-point discovery: reused `detect_project()`'s own
+  `_SKIP_DIRS`/`_MAX_SCAN_DEPTH` walk pattern, plus one new,
+  purpose-specific skip set — not a second bespoke walk implementation.**
+  Revisits the scope limit named directly above; the todo item itself
+  named the exact risk a recursive walk would reintroduce (an unrelated
+  `__main__` guard inside a vendored dependency), already solved once for
+  `detect_project()`'s own tree walk via `_SKIP_DIRS`/`_MAX_SCAN_DEPTH` —
+  reusing that established, already-tested pattern for
+  `_find_python_entrypoints()` was lower-risk than inventing new
+  depth-bounding/skip logic for a second walk.
+  - **A separate `_ENTRYPOINT_SKIP_DIRS = _SKIP_DIRS | {"tests", "test"}`
+    set, not a mutation of the shared `_SKIP_DIRS` global.** Recursion
+    surfaces a second false-positive risk the todo item's text didn't name
+    explicitly but is clearly within its spirit: a project's own
+    `tests`/`test` directory can contain a script with its own
+    `if __name__ == "__main__": unittest.main()`, which is not "the
+    program's own entry point" once the walk goes recursive (it was never
+    reachable before, since entry-point discovery only looked at the
+    project root). `_SKIP_DIRS` is also used by `detect_project()`'s own,
+    unrelated walk, where excluding `tests`/`test` would be semantically
+    wrong (a project's tests are relevant to detecting it's a Python
+    project) — so this needed a second, purpose-specific set rather than
+    changing the shared one.
+  - **Return values stay relative paths from `os.path.relpath(path, root)`,
+    preserving exact backward compatibility for a root-level entry
+    point** (a bare filename, e.g. `"hanoi.py"`, unchanged) while a nested
+    one now reports as e.g. `"src/app/main.py"` — downstream consumers
+    (`_entrypoint_ordering_spec`, the smoke-run `CheckSpec`'s
+    `command=[*_python_command(), name]` with `cwd=root`) needed no
+    changes at all, since `os.path.join(root, name)` and running
+    `python <relative-path>` with `cwd=root` already handle a nested
+    relative path correctly.
+  - Verified live: a synthetic project with a nested entry point
+    (`src/app/main.py`), a vendored dependency's own `__main__` guard
+    (`vendor/somelib/cli.py`), and a test script with its own guard
+    (`tests/test_cli.py`) correctly discovers only the real nested entry
+    point — and the existing `projects/hanoi/` repro (a root-level entry
+    point) still returns `["hanoi.py"]`, byte-for-byte as before this
+    change.
 - **`reasoning_effort` added as a fifth per-request LLM override field
   (`config.py`/`llm.py`/`cli.py`/`server.py`), reusing `override_llm()`
   rather than a parallel mechanism.** Prompted by "does our LLM abstraction

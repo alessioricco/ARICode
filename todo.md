@@ -367,11 +367,22 @@ agent-server image. Low urgency: fixing it means adding a Maven/Gradle
 toolchain to the Docker image and dev setup for a language this project
 has never actually been asked to build, not fixing a code defect.
 
-### 30. Recursive entry-point discovery
-Entry points are only checked at a Python project's root directory, not
-recursively — deliberate, since a deeper walk risks matching an unrelated
-`__main__` guard inside a vendored dependency. Revisit only if a real
-nested-entry-point project is actually seen; no evidence of that yet.
+### 30. ~~Recursive entry-point discovery~~ — DONE
+`_find_python_entrypoints()` now walks the whole project tree, bounded by
+the same `_MAX_SCAN_DEPTH` `detect_project()` uses, filtered by a new
+`_ENTRYPOINT_SKIP_DIRS = _SKIP_DIRS | {"tests", "test"}` (the vendor/build
+skip list this item flagged as the risk, plus a project's own tests
+directory — a test script's own `unittest.main()` guard is not the
+program's entry point). Returns paths relative to the project root, so a
+root-level entry point is unchanged (a bare filename) and a nested one
+reports as e.g. `src/app/main.py`; downstream consumers needed no changes.
+9 new tests added (nested discovery, vendor/node_modules/venv/hidden-dir
+skipping, tests-dir skipping, depth bound, ordering-check and smoke-run
+command construction for a nested path); full suite 545 passed. Verified
+live against a synthetic nested project (vendor/tests correctly excluded)
+and against the existing `projects/hanoi/` root-level repro (unchanged
+`["hanoi.py"]`). See `ROADMAP.md` decisions log and `MANUAL.md` "Custom
+tools".
 
 ### 31. `reasoning_summary` / `extended_thinking_budget` / `enable_encrypted_reasoning` wiring
 The SDK exposes three more reasoning-related `LLM` fields beyond
