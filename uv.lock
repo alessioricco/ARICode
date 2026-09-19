@@ -767,6 +767,7 @@ dependencies = [
     { name = "openhands-sdk" },
     { name = "openhands-tools" },
     { name = "python-dotenv" },
+    { name = "pyyaml" },
 ]
 
 [package.optional-dependencies]
@@ -810,6 +811,7 @@ requires-dist = [
     { name = "pymysql", marker = "extra == 'store-mysql'", specifier = ">=1.1" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "python-dotenv", specifier = ">=1.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "redis", marker = "extra == 'store-redis'", specifier = ">=5.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
     { name = "sqlalchemy", marker = "extra == 'store-mysql'", specifier = ">=2.0" },

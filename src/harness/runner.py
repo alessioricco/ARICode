@@ -20,7 +20,9 @@ from openhands.sdk import (
     TextContent,
 )
 from openhands.sdk.conversation import ConversationState
+from openhands.sdk.conversation.exceptions import ConversationRunError
 from openhands.sdk.event import ActionEvent, ObservationEvent
+from openhands.sdk.llm.exceptions.types import LLMError
 from openhands.sdk.security.confirmation_policy import AlwaysConfirm
 from openhands.tools.task_tracker import TaskTrackerTool
 
@@ -28,6 +30,15 @@ from .acceptance import AcceptanceCheck, AcceptanceCheckResult, evaluate_accepta
 from .agent import build_agent
 from .config import Config, load_config
 from .custom_tools.run_tests_tool import CheckOutcome, VerificationRun, run_full_verification
+from .model_catalog import classify_task, load_model_catalog, rank_candidates
+from .model_selection import (
+    ModelChain,
+    ModelDecisionRecord,
+    OnModelChoice,
+    config_for_entry,
+    llm_for_entry,
+    write_model_decisions,
+)
 from .workspace import build_workspace
 
 # The eleven terminal states a task run can end in. Exactly these because
@@ -126,6 +137,10 @@ class TaskOutcome:
     # but only a required check's failure can downgrade verification_state
     # itself (from "verified" to "acceptance_failed").
     acceptance_results: tuple[AcceptanceCheckResult, ...] = ()
+    # Only non-empty when cfg.model_selection == "auto" — see
+    # model_selection.py's ModelChain. The same records are also written to
+    # MODEL_DECISIONS.md in the project workspace (write_model_decisions).
+    model_decisions: tuple[ModelDecisionRecord, ...] = ()
 
     @property
     def success(self) -> bool:
@@ -428,12 +443,87 @@ def _outcome_for_run_result(
     )
 
 
+def _run_conversation_once(
+    conversation: Conversation,
+    cfg: Config,
+    emit: Callable[[Message], None],
+    model_chain: ModelChain | None,
+) -> None:
+    """One `conversation.run()` call, transparently falling back through
+    `model_chain` on a provider/API-level failure (auth error, rate limit,
+    provider outage, context overflow — anything LiteLLM itself raises)
+    until one succeeds or the chain is exhausted, in which case the last
+    such error is re-raised. Any other exception (a real bug, not a
+    provider problem) always propagates immediately, whether or not auto
+    model selection is active — this is not a general retry-on-any-error
+    mechanism.
+
+    `LocalConversation.run()` catches every exception its run loop raises
+    and re-raises it wrapped as `ConversationRunError` (confirmed by reading
+    the SDK source, not assumed) — `.original_exception` is the real
+    underlying exception, checked against
+    `openhands.sdk.llm.exceptions.types.LLMError` here.
+
+    Took two rounds of live verification to land on the right type, not
+    assumed either time: a first guess (`litellm.exceptions.APIError`) was
+    wrong because every concrete LiteLLM exception actually subclasses the
+    *same-named* class from the `openai` package, not `litellm.exceptions`'
+    own base (confirmed by inspecting fully-qualified `__mro__` entries, not
+    just `__name__`, which hid this at first). A second guess
+    (`openai.OpenAIError`) was *also* wrong, caught only by an actual live
+    call with a deliberately invalid key: the SDK wraps every LLM-call
+    failure in its own `LLMError` hierarchy
+    (`LLMAuthenticationError`/`LLMRateLimitError`/`LLMTimeoutError`/
+    `LLMContextWindowExceedError`/`LLMServiceUnavailableError`/
+    `LLMBadRequestError`/...) before it ever reaches this code —
+    `exc.original_exception` was a real `LLMAuthenticationError`, not a bare
+    LiteLLM/OpenAI exception at all. `LLMError` is that hierarchy's one
+    common base.
+
+    A no-op fallback (behaves exactly like a bare `conversation.run()` call)
+    when `model_chain` is `None` (auto mode off) or `cfg.execution !=
+    "local"` (`conversation.switch_llm` doesn't exist on `RemoteConversation`
+    — see ROADMAP.md's decisions log).
+    """
+    while True:
+        try:
+            conversation.run()
+            return
+        except ConversationRunError as exc:
+            if (
+                model_chain is None
+                or cfg.execution != "local"
+                or not isinstance(exc.original_exception, LLMError)
+            ):
+                raise
+            failed_name = model_chain.current.name
+            next_entry = model_chain.advance(
+                kind="escalation_api_failure",
+                reason=(
+                    f"{failed_name} failed with "
+                    f"{type(exc.original_exception).__name__}: {exc.original_exception}"
+                ),
+            )
+            if next_entry is None:
+                raise
+            _emit_notice(
+                emit,
+                f"Harness: {failed_name} failed "
+                f"({type(exc.original_exception).__name__}) — switching to "
+                f"{next_entry.name} and retrying.",
+            )
+            conversation.switch_llm(
+                llm_for_entry(cfg, next_entry, usage_id=f"harness:{next_entry.name}")
+            )
+
+
 def _run_with_confirmation(
     conversation: Conversation,
     cfg: Config,
     emit: Callable[[Message], None],
     on_confirm: ConfirmCallback | None,
     deadline: float = float("inf"),
+    model_chain: ModelChain | None = None,
 ) -> str:
     """Drive `conversation.run()` to completion, resolving every
     `AlwaysConfirm` pause along the way instead of leaving it unhandled —
@@ -474,7 +564,7 @@ def _run_with_confirmation(
     """
     if time.monotonic() >= deadline:
         return _RUN_BUDGET_EXHAUSTED
-    conversation.run()
+    _run_conversation_once(conversation, cfg, emit, model_chain)
     if cfg.confirm_mode != "always":
         return _RUN_OK
     while conversation.state.execution_status == _WAITING_FOR_CONFIRMATION:
@@ -502,10 +592,10 @@ def _run_with_confirmation(
             )
             return _RUN_BUDGET_EXHAUSTED
         if on_confirm(pending):
-            conversation.run()
+            _run_conversation_once(conversation, cfg, emit, model_chain)
         else:
             conversation.reject_pending_actions("Rejected by the user via harness confirm-mode.")
-            conversation.run()
+            _run_conversation_once(conversation, cfg, emit, model_chain)
     return _RUN_OK
 
 
@@ -516,6 +606,7 @@ def _verify_and_report(
     task: str,
     on_confirm: ConfirmCallback | None = None,
     deadline: float = float("inf"),
+    model_chain: ModelChain | None = None,
 ) -> TaskOutcome:
     """Post-hoc safety net for agent.py's `_VERIFY_BEFORE_FINISH_SUFFIX`: run
     the project's own checks ourselves instead of trusting the agent's
@@ -581,8 +672,25 @@ def _verify_and_report(
         previous_signature = _failure_signature(run)
         attempts_left -= 1
         retries_used += 1
+        if model_chain is not None and cfg.execution == "local":
+            failed_name = model_chain.current.name
+            next_entry = model_chain.advance(
+                kind="escalation_quality_failure",
+                reason=f"{failed_name}'s fix attempt still failed verification ({run.state}).",
+            )
+            if next_entry is not None:
+                _emit_notice(
+                    emit,
+                    f"Harness: escalating from {failed_name} to {next_entry.name} "
+                    "after a failed verification retry.",
+                )
+                conversation.switch_llm(
+                    llm_for_entry(cfg, next_entry, usage_id=f"harness:{next_entry.name}")
+                )
         conversation.send_message(_verification_followup(run))
-        run_result = _run_with_confirmation(conversation, cfg, emit, on_confirm, deadline)
+        run_result = _run_with_confirmation(
+            conversation, cfg, emit, on_confirm, deadline, model_chain
+        )
         outcome = _outcome_for_run_result(
             run_result, task, cfg, checks=tuple(run.checks), retries_used=retries_used
         )
@@ -719,6 +827,7 @@ def _enforce_task_tracker_completion(
     task: str,
     on_confirm: ConfirmCallback | None = None,
     deadline: float = float("inf"),
+    model_chain: ModelChain | None = None,
 ) -> TaskOutcome | None:
     """Post-hoc safety net for `_AUTONOMOUS_SUFFIX`'s "never leave your own
     task_tracker list incomplete" instruction: inspect the agent's own
@@ -781,8 +890,27 @@ def _enforce_task_tracker_completion(
             )
         attempts_left -= 1
         retries_used += 1
+        if model_chain is not None and cfg.execution == "local":
+            failed_name = model_chain.current.name
+            next_entry = model_chain.advance(
+                kind="escalation_quality_failure",
+                reason=(
+                    f"{failed_name} left its own task_tracker list incomplete after a follow-up."
+                ),
+            )
+            if next_entry is not None:
+                _emit_notice(
+                    emit,
+                    f"Harness: escalating from {failed_name} to {next_entry.name} "
+                    "after an incomplete task_tracker follow-up.",
+                )
+                conversation.switch_llm(
+                    llm_for_entry(cfg, next_entry, usage_id=f"harness:{next_entry.name}")
+                )
         conversation.send_message(_task_tracker_followup(pending))
-        run_result = _run_with_confirmation(conversation, cfg, emit, on_confirm, deadline)
+        run_result = _run_with_confirmation(
+            conversation, cfg, emit, on_confirm, deadline, model_chain
+        )
         outcome = _outcome_for_run_result(run_result, task, cfg, retries_used=retries_used)
         if outcome is not None:
             return outcome
@@ -876,6 +1004,7 @@ def stream_task(
     on_confirm: ConfirmCallback | None = None,
     acceptance_checks: Sequence[AcceptanceCheck] | None = None,
     on_awaiting_input: OnAwaitingInput | None = None,
+    on_model_choice: OnModelChoice | None = None,
 ) -> TaskOutcome:
     """Run a task, invoking `on_message` with each message as it's produced,
     and return the terminal `TaskOutcome` once verification has settled.
@@ -889,7 +1018,10 @@ def stream_task(
     is only consulted when `cfg.interactive` is true, and only around the
     *initial* run — see the interactive loop below and ROADMAP.md's
     decisions log for why task_tracker/verification retries stay fully
-    autonomous even in interactive mode.
+    autonomous even in interactive mode. `on_model_choice` is only consulted
+    when both `cfg.model_selection == "auto"` and `cfg.interactive` are
+    true — see model_selection.py's `ModelChain` for the deterministic
+    scoring/fallback-chain design.
     """
     if cfg is None:
         cfg = load_config()
@@ -902,9 +1034,33 @@ def stream_task(
             checkpoint_buffer.append(message)
             emit(message)
 
+    # HARNESS_MODEL_SELECTION=auto: pick the best-fit catalog candidate for
+    # this task before the Agent/Conversation is even built. The rest of
+    # this function keeps using `cfg` unchanged (workspace, execution,
+    # confirm_mode, verify_tests, ...) — only the Agent's own LLM is built
+    # from a catalog entry's config (see model_selection.config_for_entry).
+    model_chain: ModelChain | None = None
+    agent_cfg = cfg
+    agent_usage_id = "harness"
+    if cfg.model_selection == "auto":
+        catalog = load_model_catalog(cfg.models_file)
+        profile = classify_task(task, catalog)
+        ranked = rank_candidates(catalog, profile.weights)
+        chosen_index = 0
+        reason = f"Task classified as '{profile.name}' (weights: {profile.weights})."
+        if cfg.interactive and on_model_choice is not None:
+            chosen_index = on_model_choice(ranked, 0, reason)
+        model_chain = ModelChain(
+            ranked, task_profile=profile.name, weights=profile.weights, start_index=chosen_index
+        )
+        model_chain.record_initial(reason)
+        entry = model_chain.current
+        agent_cfg = config_for_entry(cfg, entry)
+        agent_usage_id = f"harness:{entry.name}"
+
     with build_workspace(cfg) as workspace:
         conversation = Conversation(
-            agent=build_agent(cfg),
+            agent=build_agent(agent_cfg, usage_id=agent_usage_id),
             callbacks=[on_event],
             workspace=workspace,
             # Previously unset (SDK default 500), so HARNESS_MAX_ITERATIONS
@@ -927,44 +1083,89 @@ def stream_task(
         # from the SDK. See _run_with_confirmation's docstring and
         # ROADMAP.md's decisions log for the exact multiplication this closes.
         deadline = time.monotonic() + cfg.max_task_seconds
-        conversation.send_message(task)
-        run_result = _run_with_confirmation(conversation, cfg, emit, on_confirm, deadline)
+        try:
+            outcome = _run_stream_task_phases(
+                conversation,
+                cfg,
+                emit,
+                task,
+                on_confirm,
+                on_awaiting_input,
+                deadline,
+                model_chain,
+                checkpoint_buffer,
+            )
+        finally:
+            # Written even when a phase raises (e.g. every candidate in an
+            # auto-selection chain failed at the API level) — that's exactly
+            # when the escalation history matters most for debugging. See
+            # the live repro this fixed in ROADMAP.md's decisions log.
+            if model_chain is not None:
+                write_model_decisions(cfg.workspace, model_chain.decisions)
+        outcome = _apply_acceptance_checks(outcome, cfg, emit, acceptance_checks)
+        if model_chain is not None:
+            outcome = replace(outcome, model_decisions=tuple(model_chain.decisions))
+        return outcome
+
+
+def _run_stream_task_phases(
+    conversation: Conversation,
+    cfg: Config,
+    emit: Callable[[Message], None],
+    task: str,
+    on_confirm: ConfirmCallback | None,
+    on_awaiting_input: OnAwaitingInput | None,
+    deadline: float,
+    model_chain: ModelChain | None,
+    checkpoint_buffer: list[Message],
+) -> TaskOutcome:
+    """The initial run, the interactive checkpoint loop, and the two
+    autonomous retry phases — split out of `stream_task` purely so the
+    `finally: write_model_decisions(...)` wrapping it can run regardless of
+    which phase raises, without an extra indent level for all of it.
+    """
+    conversation.send_message(task)
+    run_result = _run_with_confirmation(conversation, cfg, emit, on_confirm, deadline, model_chain)
+    outcome = _outcome_for_run_result(run_result, task, cfg)
+
+    # HARNESS_INTERACTIVE=yes, initial run only (see stream_task's
+    # docstring and ROADMAP.md's decisions log): the SDK can't tell a
+    # genuine clarifying question apart from real completion — both set
+    # execution_status = FINISHED identically (see agent.py's
+    # _AUTONOMOUS_SUFFIX docstring) — so rather than guessing, always
+    # offer the human a checkpoint here and let them decide. Has no
+    # effect without a caller-supplied on_awaiting_input (server.py
+    # never supplies one; cfg.interactive alone is not enough).
+    while (
+        outcome is None
+        and cfg.interactive
+        and on_awaiting_input is not None
+        and conversation.state.execution_status == ConversationExecutionStatus.FINISHED
+    ):
+        narrative = _narrative_text(checkpoint_buffer)
+        checkpoint_buffer.clear()
+        wait_started = time.monotonic()
+        reply = on_awaiting_input(narrative)
+        # Time spent waiting on the human doesn't count against the
+        # shared task budget — only actual agent run time should.
+        deadline += time.monotonic() - wait_started
+        if not reply:
+            break
+        conversation.send_message(reply)
+        run_result = _run_with_confirmation(
+            conversation, cfg, emit, on_confirm, deadline, model_chain
+        )
         outcome = _outcome_for_run_result(run_result, task, cfg)
 
-        # HARNESS_INTERACTIVE=yes, initial run only (see stream_task's
-        # docstring and ROADMAP.md's decisions log): the SDK can't tell a
-        # genuine clarifying question apart from real completion — both set
-        # execution_status = FINISHED identically (see agent.py's
-        # _AUTONOMOUS_SUFFIX docstring) — so rather than guessing, always
-        # offer the human a checkpoint here and let them decide. Has no
-        # effect without a caller-supplied on_awaiting_input (server.py
-        # never supplies one; cfg.interactive alone is not enough).
-        while (
-            outcome is None
-            and cfg.interactive
-            and on_awaiting_input is not None
-            and conversation.state.execution_status == ConversationExecutionStatus.FINISHED
-        ):
-            narrative = _narrative_text(checkpoint_buffer)
-            checkpoint_buffer.clear()
-            wait_started = time.monotonic()
-            reply = on_awaiting_input(narrative)
-            # Time spent waiting on the human doesn't count against the
-            # shared task budget — only actual agent run time should.
-            deadline += time.monotonic() - wait_started
-            if not reply:
-                break
-            conversation.send_message(reply)
-            run_result = _run_with_confirmation(conversation, cfg, emit, on_confirm, deadline)
-            outcome = _outcome_for_run_result(run_result, task, cfg)
-
-        if outcome is None:
-            outcome = _enforce_task_tracker_completion(
-                conversation, cfg, emit, task, on_confirm, deadline
-            )
-        if outcome is None:
-            outcome = _verify_and_report(conversation, cfg, emit, task, on_confirm, deadline)
-        return _apply_acceptance_checks(outcome, cfg, emit, acceptance_checks)
+    if outcome is None:
+        outcome = _enforce_task_tracker_completion(
+            conversation, cfg, emit, task, on_confirm, deadline, model_chain
+        )
+    if outcome is None:
+        outcome = _verify_and_report(
+            conversation, cfg, emit, task, on_confirm, deadline, model_chain
+        )
+    return outcome
 
 
 def run_task(
@@ -973,6 +1174,7 @@ def run_task(
     on_confirm: ConfirmCallback | None = None,
     acceptance_checks: Sequence[AcceptanceCheck] | None = None,
     on_awaiting_input: OnAwaitingInput | None = None,
+    on_model_choice: OnModelChoice | None = None,
 ) -> TaskResult:
     messages: list = []
     outcome = stream_task(
@@ -982,5 +1184,6 @@ def run_task(
         on_confirm=on_confirm,
         acceptance_checks=acceptance_checks,
         on_awaiting_input=on_awaiting_input,
+        on_model_choice=on_model_choice,
     )
     return TaskResult(messages, outcome)  # last message is the final assistant output

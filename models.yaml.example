@@ -1,0 +1,72 @@
+# Copy to models.yaml and fill in real keys. models.yaml is git-ignored and
+# must never be committed — same rule as .env (see CLAUDE.md).
+#
+# Consulted only when HARNESS_MODEL_SELECTION=auto (or --auto-model). With
+# the default (manual), none of this is read — LLM_MODEL/LLM_API_KEY from
+# .env are used exactly as they are today. See MANUAL.md "Automatic model
+# selection" for the full writeup.
+
+models:
+  - name: claude-sonnet          # short id used in logs, prompts, MODEL_DECISIONS.md
+    model: anthropic/claude-sonnet-4-5-20250929   # same LiteLLM-style id as LLM_MODEL
+    api_key: ""                                    # same meaning as LLM_API_KEY
+    base_url: ""                                   # same meaning as LLM_BASE_URL (blank = provider default)
+    reasoning_effort: ""                            # same meaning as LLM_REASONING_EFFORT (blank = SDK default)
+    description: >
+      Strong, well-rounded coding model. Good default for most tasks;
+      reliable at multi-step reasoning without being the most expensive
+      option.
+    ratings:                     # 0-5, hand-curated — no objective source, these are opinions
+      reasoning: 4
+      cost: 3
+      precision: 4
+      code: 4
+
+  - name: gpt-4o
+    model: openai/gpt-4o
+    api_key: ""
+    base_url: ""
+    reasoning_effort: ""
+    description: >
+      Fast, broadly capable general-purpose model. Comparable tier to
+      claude-sonnet above; keep both in the catalog to get real fallback
+      diversity if one provider has an outage.
+    ratings:
+      reasoning: 4
+      cost: 3
+      precision: 4
+      code: 4
+
+  - name: ollama-local
+    model: ollama/llama3
+    api_key: ""                  # local models are typically keyless
+    base_url: "http://localhost:11434"
+    reasoning_effort: ""
+    description: >
+      Local, self-hosted, effectively free to run — but noticeably weaker
+      at complex reasoning and less reliable on larger codebases. Good
+      first attempt for trivial/cheap tasks; expect it to often fall
+      through to a better-rated model in the chain.
+    ratings:
+      reasoning: 2
+      cost: 5
+      precision: 2
+      code: 2
+
+# Deterministic (no LLM call) task -> weight-vector classification, reused
+# from this harness's existing KeywordTrigger pattern (see skills/). First
+# matching profile wins; "default" applies when nothing else matches. Add
+# your own axes/profiles freely — scoring just sums whatever keys a
+# profile's weights declare, nothing here is hardcoded to these four names.
+task_profiles:
+  debugging:
+    triggers: [fix, bug, crash, "failing test", "race condition", debug, error]
+    weights: {reasoning: 3, precision: 2, code: 1, cost: 0.5}
+  scaffolding:
+    triggers: [scaffold, "create a new", "set up", boilerplate, initialize, "starter project"]
+    weights: {cost: 2, code: 1, reasoning: 0.5, precision: 0.5}
+  refactor:
+    triggers: [refactor, "clean up", simplify, restructure]
+    weights: {code: 2, precision: 2, reasoning: 1, cost: 0.5}
+  default:
+    weights: {reasoning: 1, cost: 1, precision: 1, code: 1}

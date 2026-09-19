@@ -19,6 +19,7 @@ reference — how to actually run and configure the thing.
 - [Configuration reference](#configuration-reference)
 - [CLI reference](#cli-reference)
 - [Interactive mode](#interactive-mode)
+- [Automatic model selection](#automatic-model-selection)
 - [Server mode (HTTP/WebSocket)](#server-mode-httpwebsocket)
 - [Task registry persistence](#task-registry-persistence)
 - [Projects: one subfolder per generated project](#projects-one-subfolder-per-generated-project)
@@ -83,6 +84,8 @@ template with every variable documented inline.
 | `HARNESS_MAX_VERIFY_RETRIES` | `2` | How many automated fix-and-retry cycles `HARNESS_VERIFY_TESTS=always` allows before giving up. |
 | `HARNESS_MAX_TASK_SECONDS` | `1800` | Shared wall-clock budget (seconds) for one whole task — the initial run plus every task_tracker/verification retry combined, not just a single `conversation.run()` call. See [Task budget](#task-budget). |
 | `HARNESS_INTERACTIVE` | `no` | Allow the agent to pause and ask instead of always pushing forward autonomously. Only meaningful with the CLI's `--interactive` flag — see [Interactive mode](#interactive-mode). |
+| `HARNESS_MODEL_SELECTION` | `manual` | `manual` \| `auto` — pick the best-fit model per task from a hand-curated catalog instead of always using `LLM_MODEL`. See [Automatic model selection](#automatic-model-selection). |
+| `HARNESS_MODELS_FILE` | `./models.yaml` | Path to the model catalog, only read when `HARNESS_MODEL_SELECTION=auto`. |
 | `HARNESS_TASK_STORE` | `memory` | `memory` \| `redis` \| `sqlite` \| `mysql` \| `postgres` — server-mode task registry backend, consulted only by `harness-server`/`harness-admin`. See [Task registry persistence](#task-registry-persistence). |
 | `HARNESS_TASK_TTL_SECONDS` | `0` | Seconds a completed/failed task record is kept before it's eligible for purge; `0` means keep forever. |
 | `HARNESS_TASK_STORE_SQLITE_PATH` | `./harness_tasks.db` | sqlite backend only. |
@@ -95,8 +98,8 @@ template with every variable documented inline.
 ```bash
 uv run python -m harness "<task>" [--execution {local,docker}] [--project NAME] \
     [--agents-md TEXT] [--model MODEL] [--api-key KEY] [--base-url URL] \
-    [--reasoning-effort LEVEL] [--interactive] [--require-verification] \
-    [--acceptance-checks JSON_OR_FILE]
+    [--reasoning-effort LEVEL] [--interactive] [--auto-model] \
+    [--require-verification] [--acceptance-checks JSON_OR_FILE]
 ```
 
 (Also installed as a console script: `harness "<task>" ...`, once the package
@@ -124,6 +127,9 @@ is installed via `uv pip install -e .`.)
 - `--interactive` — off by default. Allow the agent to pause and ask you a
   question instead of always pushing forward on its own — see [Interactive
   mode](#interactive-mode) below.
+- `--auto-model` — off by default. Pick the best-fit model for this task
+  from a hand-curated catalog instead of always using `LLM_MODEL` — see
+  [Automatic model selection](#automatic-model-selection) below.
 - `--require-verification` — off by default. Treats an `inconclusive`
   verification result (nothing runnable confirmed the software works — an
   unknown project type, a missing required tool, a project with no tests
@@ -250,6 +256,93 @@ deployment still drops the autonomous instruction from the prompt with
 nobody available to answer if the agent does ask something, which can leave
 a task less thoroughly finished than the default — leave this at `no` (the
 default) for `harness-server`.
+
+## Automatic model selection
+
+By default the harness runs one, explicitly-configured model for the whole
+task (`LLM_MODEL`, or a per-request/`--model` override). `--auto-model`
+(`HARNESS_MODEL_SELECTION=auto` in `.env`, or the CLI flag — off by
+default) picks instead from a hand-curated catalog of candidate models,
+scored by what the task looks like, with automatic fallback if the chosen
+one fails.
+
+### `models.yaml`
+
+Copy `models.yaml.example` to `models.yaml` (git-ignored, exactly like
+`.env` — it holds real API keys) and list your candidates:
+
+```yaml
+models:
+  - name: claude-sonnet
+    model: anthropic/claude-sonnet-4-5-20250929   # same LiteLLM-style id as LLM_MODEL
+    api_key: "sk-..."                              # same meaning as LLM_API_KEY
+    base_url: ""                                   # same meaning as LLM_BASE_URL
+    reasoning_effort: ""                            # same meaning as LLM_REASONING_EFFORT
+    description: "Strong, well-rounded coding model."
+    ratings: {reasoning: 4, cost: 3, precision: 4, code: 4}   # 0-5, hand-curated
+
+task_profiles:
+  debugging:
+    triggers: [fix, bug, crash, "failing test", debug]
+    weights: {reasoning: 3, precision: 2, code: 1, cost: 0.5}
+  default:
+    weights: {reasoning: 1, cost: 1, precision: 1, code: 1}
+```
+
+Rating/weight axes are open-ended, not fixed to `reasoning`/`cost`/
+`precision`/`code` — add your own with no code changes, scoring just sums
+whatever a `task_profiles` entry's `weights` declares. No minimum number of
+models is required; one entry just means no fallback chain.
+
+### How a model is picked
+
+1. **Classification** — the task text is matched (case-insensitive
+   substring, first declared profile wins) against each `task_profiles`
+   entry's `triggers`; no match falls back to a profile named `default`.
+   Deterministic, no extra LLM call.
+2. **Scoring** — every catalog model gets a weighted sum over the matched
+   profile's axes; the full list is sorted descending into a ranked chain.
+   This ranking is computed **once**, at the start of the task, and never
+   recomputed — see [Known limitations](#known-limitations) for what that
+   means for the fallback behavior below.
+3. **The top-ranked candidate runs first.** With `--interactive` also on,
+   you're prompted with the full ranked list (name, ratings, description)
+   and can accept the recommendation or pick another by number; without
+   it, the top choice is used automatically.
+4. **Falling back** — the harness moves to the next candidate in the same
+   ranked list when the current one:
+   - fails at the API level (auth error, rate limit, provider outage,
+     context-window overflow — anything the SDK's own LLM-call layer
+     raises), with no verification cycle needed since nothing was produced
+     to check, or
+   - produces a fix attempt that still fails the existing automated
+     verification/task_tracker-completion retry loops (see [Test
+     verification](#test-verification)).
+
+   Once the chain is exhausted, the task ends the same way it would
+   without auto-selection (the real error propagates, or the existing
+   terminal states like `retry_exhausted` apply).
+
+### Visibility
+
+Every decision — the initial pick and each fallback — is written to
+`MODEL_DECISIONS.md` in the project workspace (even if the task ultimately
+fails once every candidate is exhausted) recording the task's
+classification, the full ranked list with scores, which candidate was
+chosen, and why. The same records are on `TaskOutcome.model_decisions` for
+programmatic callers, and the CLI prints which model was actually used
+before its `Verification: ...` line.
+
+### Docker
+
+The initial pick works under `HARNESS_EXECUTION=docker` — it's just which
+catalog entry builds the one model used for the whole run. Mid-task
+fallback (either failure type above) is **local-execution only**: the SDK
+method this needs (`conversation.switch_llm`) exists on `LocalConversation`
+but not yet on `RemoteConversation`'s Python client (the remote agent-server
+already has the matching endpoint — the gap is only in the SDK's client
+library). Under docker, a candidate that fails just fails — the task ends
+normally, it doesn't fall back to the next model.
 
 ## Server mode (HTTP/WebSocket)
 
@@ -1460,6 +1553,17 @@ uv run pytest -q
   loops, nobody is prompted; the harness's own automated follow-up message
   is what continues the conversation, same as non-interactive mode. Not
   supported by `server.py` at all (no terminal to prompt at).
+- **`--auto-model`'s fallback chain is a single ranked list, computed once,
+  never re-scored mid-task** — see [Automatic model
+  selection](#automatic-model-selection). Falling back moves to the
+  next-best-*fit-for-this-task-type* candidate, not necessarily a strictly
+  more capable model in an absolute sense; in a catalog where a task
+  profile's weighted axes correlate with overall model strength this is
+  usually still a reasonable alternative, but it's a real simplification,
+  not a guarantee. Mid-task fallback is also `local`-execution only (see
+  the same section's "Docker" note) — `models.yaml`'s persistent-store
+  question doesn't apply here (it's a config file the harness reads once
+  per task, not a running server's task registry).
 
 ## Troubleshooting
 

@@ -269,7 +269,7 @@ def test_run_with_confirmation_stops_and_rejects_once_when_no_handler(monkeypatc
 def test_stream_task_sets_always_confirm_policy_when_confirm_mode_always(monkeypatch):
     conversation = _ConfirmConversation([ConversationExecutionStatus.FINISHED])
     monkeypatch.setattr(runner, "Conversation", lambda **_kwargs: conversation)
-    monkeypatch.setattr(runner, "build_agent", lambda cfg: "fake-agent")
+    monkeypatch.setattr(runner, "build_agent", lambda cfg, **_kw: "fake-agent")
     monkeypatch.setattr(runner, "build_workspace", lambda cfg: nullcontext("fake-workspace"))
     monkeypatch.setattr(runner, "_enforce_task_tracker_completion", lambda *a, **kw: None)
     monkeypatch.setattr(
@@ -295,7 +295,7 @@ def test_stream_task_short_circuits_when_confirmation_required_with_no_handler(m
     monkeypatch.setattr(runner, "_pending_actions", lambda _conv: _FAKE_PENDING)
     conversation = _ConfirmConversation([ConversationExecutionStatus.WAITING_FOR_CONFIRMATION])
     monkeypatch.setattr(runner, "Conversation", lambda **_kwargs: conversation)
-    monkeypatch.setattr(runner, "build_agent", lambda cfg: "fake-agent")
+    monkeypatch.setattr(runner, "build_agent", lambda cfg, **_kw: "fake-agent")
     monkeypatch.setattr(runner, "build_workspace", lambda cfg: nullcontext("fake-workspace"))
     tracker_calls = {"count": 0}
     monkeypatch.setattr(
@@ -351,7 +351,7 @@ def test_interactive_loop_sends_reply_and_reruns_until_enter(monkeypatch):
         ]
     )
     monkeypatch.setattr(runner, "Conversation", lambda **_kwargs: conversation)
-    monkeypatch.setattr(runner, "build_agent", lambda cfg: "fake-agent")
+    monkeypatch.setattr(runner, "build_agent", lambda cfg, **_kw: "fake-agent")
     monkeypatch.setattr(runner, "build_workspace", lambda cfg: nullcontext("fake-workspace"))
     _mock_task_tracker_and_verify(monkeypatch, verification_state="inconclusive")
     replies = iter(["please also add tests", None])
@@ -374,7 +374,7 @@ def test_interactive_loop_sends_reply_and_reruns_until_enter(monkeypatch):
 def test_interactive_loop_ends_immediately_on_enter_and_proceeds_normally(monkeypatch):
     conversation = _FakeConversation(statuses_after_run=[ConversationExecutionStatus.FINISHED])
     monkeypatch.setattr(runner, "Conversation", lambda **_kwargs: conversation)
-    monkeypatch.setattr(runner, "build_agent", lambda cfg: "fake-agent")
+    monkeypatch.setattr(runner, "build_agent", lambda cfg, **_kw: "fake-agent")
     monkeypatch.setattr(runner, "build_workspace", lambda cfg: nullcontext("fake-workspace"))
     tracker_calls = {"count": 0}
 
@@ -404,7 +404,7 @@ def test_interactive_without_a_callback_never_loops(monkeypatch):
     # regression guard for the documented server-mode gotcha.
     conversation = _FakeConversation(statuses_after_run=[ConversationExecutionStatus.FINISHED])
     monkeypatch.setattr(runner, "Conversation", lambda **_kwargs: conversation)
-    monkeypatch.setattr(runner, "build_agent", lambda cfg: "fake-agent")
+    monkeypatch.setattr(runner, "build_agent", lambda cfg, **_kw: "fake-agent")
     monkeypatch.setattr(runner, "build_workspace", lambda cfg: nullcontext("fake-workspace"))
     _mock_task_tracker_and_verify(monkeypatch, verification_state="inconclusive")
 
@@ -416,7 +416,7 @@ def test_interactive_without_a_callback_never_loops(monkeypatch):
 def test_interactive_false_ignores_a_supplied_callback(monkeypatch):
     conversation = _FakeConversation(statuses_after_run=[ConversationExecutionStatus.FINISHED])
     monkeypatch.setattr(runner, "Conversation", lambda **_kwargs: conversation)
-    monkeypatch.setattr(runner, "build_agent", lambda cfg: "fake-agent")
+    monkeypatch.setattr(runner, "build_agent", lambda cfg, **_kw: "fake-agent")
     monkeypatch.setattr(runner, "build_workspace", lambda cfg: nullcontext("fake-workspace"))
     _mock_task_tracker_and_verify(monkeypatch, verification_state="inconclusive")
 
@@ -433,7 +433,7 @@ def test_interactive_false_ignores_a_supplied_callback(monkeypatch):
 def test_interactive_loop_does_not_trigger_on_a_stuck_status(monkeypatch):
     conversation = _FakeConversation(statuses_after_run=[ConversationExecutionStatus.STUCK])
     monkeypatch.setattr(runner, "Conversation", lambda **_kwargs: conversation)
-    monkeypatch.setattr(runner, "build_agent", lambda cfg: "fake-agent")
+    monkeypatch.setattr(runner, "build_agent", lambda cfg, **_kw: "fake-agent")
     monkeypatch.setattr(runner, "build_workspace", lambda cfg: nullcontext("fake-workspace"))
 
     def _fail_if_called(_narrative: str) -> str | None:
@@ -460,7 +460,7 @@ def test_interactive_wait_time_is_excluded_from_the_task_budget(monkeypatch):
         ]
     )
     monkeypatch.setattr(runner, "Conversation", lambda **_kwargs: conversation)
-    monkeypatch.setattr(runner, "build_agent", lambda cfg: "fake-agent")
+    monkeypatch.setattr(runner, "build_agent", lambda cfg, **_kw: "fake-agent")
     monkeypatch.setattr(runner, "build_workspace", lambda cfg: nullcontext("fake-workspace"))
     _mock_task_tracker_and_verify(monkeypatch, verification_state="verified")
     clock = _ManualClock()
@@ -614,7 +614,7 @@ def test_stream_task_short_circuits_when_task_budget_already_exhausted(monkeypat
     # but the clock is mocked so the test doesn't need to actually wait).
     conversation = _RecordingConversation()
     monkeypatch.setattr(runner, "Conversation", lambda **_kwargs: conversation)
-    monkeypatch.setattr(runner, "build_agent", lambda cfg: "fake-agent")
+    monkeypatch.setattr(runner, "build_agent", lambda cfg, **_kw: "fake-agent")
     monkeypatch.setattr(runner, "build_workspace", lambda cfg: nullcontext("fake-workspace"))
     tracker_calls = {"count": 0}
     monkeypatch.setattr(
@@ -1024,7 +1024,7 @@ def test_task_tracker_short_circuits_project_verification_when_still_incomplete(
         ),
     )
     monkeypatch.setattr(runner, "Conversation", _Conversation)
-    monkeypatch.setattr(runner, "build_agent", lambda cfg: "fake-agent")
+    monkeypatch.setattr(runner, "build_agent", lambda cfg, **_kw: "fake-agent")
     monkeypatch.setattr(runner, "build_workspace", lambda cfg: nullcontext("fake-workspace"))
 
     outcome = runner.stream_task(
@@ -1451,7 +1451,7 @@ def test_stream_task_wires_max_iterations_to_conversation(monkeypatch):
     # loudly here instead of silently reverting to an unbounded default.
     _RecordingConversation.instances = []
     monkeypatch.setattr(runner, "Conversation", _RecordingConversation)
-    monkeypatch.setattr(runner, "build_agent", lambda cfg: "fake-agent")
+    monkeypatch.setattr(runner, "build_agent", lambda cfg, **_kw: "fake-agent")
     monkeypatch.setattr(runner, "build_workspace", lambda cfg: _FakeWorkspaceCM("fake-workspace"))
 
     outcome = runner.stream_task("do the thing", cfg=_cfg(verify_tests="never", max_iterations=17))
@@ -1603,7 +1603,7 @@ def test_stream_task_applies_acceptance_checks_end_to_end(monkeypatch, tmp_path)
     (tmp_path / "OUTPUT.txt").write_text("done")
     conversation = _RecordingConversation()
     monkeypatch.setattr(runner, "Conversation", lambda **_kwargs: conversation)
-    monkeypatch.setattr(runner, "build_agent", lambda cfg: "fake-agent")
+    monkeypatch.setattr(runner, "build_agent", lambda cfg, **_kw: "fake-agent")
     monkeypatch.setattr(runner, "build_workspace", lambda cfg: nullcontext(str(tmp_path)))
     monkeypatch.setattr(runner, "_enforce_task_tracker_completion", lambda *a, **kw: None)
     monkeypatch.setattr(
@@ -1631,7 +1631,7 @@ def test_stream_task_applies_acceptance_checks_end_to_end(monkeypatch, tmp_path)
 def test_stream_task_acceptance_check_failure_downgrades_a_real_verified_run(monkeypatch, tmp_path):
     conversation = _RecordingConversation()
     monkeypatch.setattr(runner, "Conversation", lambda **_kwargs: conversation)
-    monkeypatch.setattr(runner, "build_agent", lambda cfg: "fake-agent")
+    monkeypatch.setattr(runner, "build_agent", lambda cfg, **_kw: "fake-agent")
     monkeypatch.setattr(runner, "build_workspace", lambda cfg: nullcontext(str(tmp_path)))
     monkeypatch.setattr(runner, "_enforce_task_tracker_completion", lambda *a, **kw: None)
     monkeypatch.setattr(
@@ -1652,3 +1652,335 @@ def test_stream_task_acceptance_check_failure_downgrades_a_real_verified_run(mon
     )
 
     assert outcome.verification_state == "acceptance_failed"
+
+
+# --- HARNESS_MODEL_SELECTION=auto -------------------------------------------
+
+
+class _SwitchableConversation:
+    """Fake Conversation for model-selection tests: tracks switch_llm calls
+    and can be told to raise on a given .run() call (simulating a
+    ConversationRunError from a real provider failure) or just transition
+    execution_status normally.
+
+    `run_results`: one entry consumed per `.run()` call — `None` (status
+    unchanged), a `ConversationExecutionStatus` (status set to it), or a
+    `BaseException` instance (raised). Once exhausted, further calls leave
+    status unchanged.
+    """
+
+    def __init__(
+        self,
+        run_results: list,
+        *,
+        initial_status: ConversationExecutionStatus = ConversationExecutionStatus.FINISHED,
+    ) -> None:
+        self._run_results = list(run_results)
+        self.state = SimpleNamespace(execution_status=initial_status, events=[])
+        self.run_calls = 0
+        self.sent_messages: list[str] = []
+        self.switched_llms: list = []
+
+    def send_message(self, message: str) -> None:
+        self.sent_messages.append(message)
+
+    def run(self) -> None:
+        self.run_calls += 1
+        if not self._run_results:
+            return
+        result = self._run_results.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        if result is not None:
+            self.state.execution_status = result
+
+    def switch_llm(self, llm) -> None:
+        self.switched_llms.append(llm)
+
+
+def _run_error(message: str = "rate limited") -> Exception:
+    # A real openhands.sdk.llm.exceptions.types.LLMError, wrapped exactly the
+    # way LocalConversation.run() actually wraps every LLM-call failure —
+    # confirmed live (a real conversation.run() against a deliberately
+    # invalid API key) that this, not a bare LiteLLM/openai exception, is
+    # what .original_exception actually is. See runner.py's
+    # _run_conversation_once docstring for the two wrong guesses first.
+    from openhands.sdk.conversation.exceptions import ConversationRunError
+    from openhands.sdk.llm.exceptions.types import LLMRateLimitError
+
+    return ConversationRunError("conv-test", LLMRateLimitError(message))
+
+
+_MODEL_CATALOG_YAML = """
+models:
+  - name: cheap
+    model: openai/gpt-4o-mini
+    ratings: {reasoning: 2, cost: 5}
+  - name: balanced
+    model: anthropic/claude-sonnet-4-5-20250929
+    ratings: {reasoning: 4, cost: 3}
+  - name: strong
+    model: anthropic/claude-opus-4
+    ratings: {reasoning: 5, cost: 1}
+
+task_profiles:
+  default:
+    weights: {reasoning: 1, cost: 1}
+"""
+
+
+def _write_catalog(tmp_path) -> str:
+    path = tmp_path / "models.yaml"
+    path.write_text(_MODEL_CATALOG_YAML)
+    return str(path)
+
+
+def _stub_stream_task_dependencies(monkeypatch, conversation, tmp_path):
+    monkeypatch.setattr(runner, "Conversation", lambda **_kwargs: conversation)
+    monkeypatch.setattr(runner, "build_agent", lambda cfg, **_kw: "fake-agent")
+    monkeypatch.setattr(runner, "build_workspace", lambda cfg: nullcontext(str(tmp_path)))
+    monkeypatch.setattr(runner, "_enforce_task_tracker_completion", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        runner,
+        "_verify_and_report",
+        lambda *a, **kw: runner.TaskOutcome(
+            verification_state="verified",
+            completion_contract=runner.CompletionContract(
+                goal="", acceptance_criteria=[], verification_checks=[], limitations=[]
+            ),
+        ),
+    )
+
+
+def test_auto_mode_off_never_loads_a_catalog(monkeypatch, tmp_path):
+    conversation = _SwitchableConversation([])
+    _stub_stream_task_dependencies(monkeypatch, conversation, tmp_path)
+
+    def _fail_if_called(_path):
+        raise AssertionError("load_model_catalog should not be called when model_selection=manual")
+
+    monkeypatch.setattr(runner, "load_model_catalog", _fail_if_called)
+
+    outcome = runner.stream_task(
+        "do the thing", cfg=_cfg(workspace=str(tmp_path), model_selection="manual")
+    )
+
+    assert outcome.model_decisions == ()
+
+
+def test_auto_mode_picks_the_best_fit_candidate_for_the_initial_run(monkeypatch, tmp_path):
+    conversation = _SwitchableConversation([])
+    _stub_stream_task_dependencies(monkeypatch, conversation, tmp_path)
+    captured_agent_cfg = {}
+
+    def _fake_build_agent(cfg, **kwargs):
+        captured_agent_cfg["cfg"] = cfg
+        captured_agent_cfg["usage_id"] = kwargs.get("usage_id")
+        return "fake-agent"
+
+    monkeypatch.setattr(runner, "build_agent", _fake_build_agent)
+
+    outcome = runner.stream_task(
+        "do the thing",
+        cfg=_cfg(
+            workspace=str(tmp_path),
+            model_selection="auto",
+            models_file=_write_catalog(tmp_path),
+        ),
+    )
+
+    # weights {reasoning: 1, cost: 1} -> cheap scores 7, balanced 7, strong 6
+    # (cheap and balanced tie at 7; cheap is declared first, wins the tie —
+    # Python's sort is stable, ties keep their original relative order).
+    assert captured_agent_cfg["cfg"].model == "openai/gpt-4o-mini"
+    assert captured_agent_cfg["usage_id"] == "harness:cheap"
+    assert len(outcome.model_decisions) == 1
+    assert outcome.model_decisions[0].kind == "initial"
+    assert outcome.model_decisions[0].chosen == "cheap"
+
+
+def test_auto_mode_writes_model_decisions_to_the_workspace(monkeypatch, tmp_path):
+    conversation = _SwitchableConversation([])
+    _stub_stream_task_dependencies(monkeypatch, conversation, tmp_path)
+
+    runner.stream_task(
+        "do the thing",
+        cfg=_cfg(
+            workspace=str(tmp_path), model_selection="auto", models_file=_write_catalog(tmp_path)
+        ),
+    )
+
+    content = (tmp_path / "MODEL_DECISIONS.md").read_text()
+    assert "# Model Decisions" in content
+    assert "initial" in content
+
+
+def test_auto_mode_interactive_prompts_for_the_initial_choice(monkeypatch, tmp_path):
+    conversation = _SwitchableConversation([])
+    _stub_stream_task_dependencies(monkeypatch, conversation, tmp_path)
+    captured_agent_cfg = {}
+    monkeypatch.setattr(
+        runner,
+        "build_agent",
+        lambda cfg, **kw: captured_agent_cfg.setdefault("cfg", cfg) and "fake-agent",
+    )
+    prompts = []
+
+    def on_model_choice(candidates, recommended_index, reason):
+        prompts.append((tuple(c.name for c in candidates), recommended_index, reason))
+        return 2  # deliberately pick the last (weakest-fit) candidate
+
+    outcome = runner.stream_task(
+        "do the thing",
+        cfg=_cfg(
+            workspace=str(tmp_path),
+            model_selection="auto",
+            models_file=_write_catalog(tmp_path),
+            interactive=True,
+        ),
+        on_model_choice=on_model_choice,
+    )
+
+    assert len(prompts) == 1
+    assert prompts[0][0] == ("cheap", "balanced", "strong")  # full ranked order
+    assert prompts[0][1] == 0  # recommended index is always the top-ranked one
+    assert outcome.model_decisions[0].chosen == "strong"  # index 2 of the ranked list
+
+
+def test_api_failure_triggers_a_switch_to_the_next_candidate(monkeypatch, tmp_path):
+    conversation = _SwitchableConversation([_run_error("auth failed"), None])
+    _stub_stream_task_dependencies(monkeypatch, conversation, tmp_path)
+
+    outcome = runner.stream_task(
+        "do the thing",
+        cfg=_cfg(
+            workspace=str(tmp_path),
+            model_selection="auto",
+            models_file=_write_catalog(tmp_path),
+            execution="local",
+        ),
+    )
+
+    assert conversation.run_calls == 2
+    assert len(conversation.switched_llms) == 1
+    kinds = [d.kind for d in outcome.model_decisions]
+    assert kinds == ["initial", "escalation_api_failure"]
+    assert outcome.verification_state == "verified"
+
+
+def test_api_failure_reraises_once_the_chain_is_exhausted(monkeypatch, tmp_path):
+    conversation = _SwitchableConversation([_run_error("e1"), _run_error("e2"), _run_error("e3")])
+    _stub_stream_task_dependencies(monkeypatch, conversation, tmp_path)
+
+    with pytest.raises(Exception, match="e3"):
+        runner.stream_task(
+            "do the thing",
+            cfg=_cfg(
+                workspace=str(tmp_path),
+                model_selection="auto",
+                models_file=_write_catalog(tmp_path),
+                execution="local",
+            ),
+        )
+
+    assert conversation.run_calls == 3  # tried all three candidates, then gave up
+
+
+def test_model_decisions_are_written_even_when_the_chain_is_exhausted_and_raises(
+    monkeypatch, tmp_path
+):
+    # Regression test: caught live — the first implementation only wrote
+    # MODEL_DECISIONS.md after a normal return, so a task that ultimately
+    # raised (every candidate failed) lost its entire escalation history —
+    # exactly the case where it matters most for debugging.
+    conversation = _SwitchableConversation([_run_error("e1"), _run_error("e2")])
+    _stub_stream_task_dependencies(monkeypatch, conversation, tmp_path)
+    # Only two candidates, so the chain is fully exhausted after two failures.
+    two_model_catalog = tmp_path / "two_models.yaml"
+    two_model_catalog.write_text(
+        "models:\n"
+        "  - name: cheap\n    model: openai/gpt-4o-mini\n    ratings: {reasoning: 2}\n"
+        "  - name: balanced\n    model: anthropic/claude-sonnet-4-5-20250929\n"
+        "    ratings: {reasoning: 4}\n"
+    )
+
+    with pytest.raises(Exception, match="e2"):
+        runner.stream_task(
+            "do the thing",
+            cfg=_cfg(
+                workspace=str(tmp_path),
+                model_selection="auto",
+                models_file=str(two_model_catalog),
+                execution="local",
+            ),
+        )
+
+    content = (tmp_path / "MODEL_DECISIONS.md").read_text()
+    assert "initial" in content
+    assert "escalation_api_failure" in content
+    assert "e1" in content
+
+
+def test_api_failure_does_not_switch_under_docker_execution(monkeypatch, tmp_path):
+    conversation = _SwitchableConversation([_run_error("auth failed")])
+    _stub_stream_task_dependencies(monkeypatch, conversation, tmp_path)
+    monkeypatch.setattr(runner, "build_workspace", lambda cfg: nullcontext(str(tmp_path)))
+
+    with pytest.raises(Exception, match="auth failed"):
+        runner.stream_task(
+            "do the thing",
+            cfg=_cfg(
+                workspace=str(tmp_path),
+                model_selection="auto",
+                models_file=_write_catalog(tmp_path),
+                execution="docker",
+            ),
+        )
+
+    assert conversation.switched_llms == []
+
+
+def test_a_non_api_exception_never_triggers_a_model_switch(monkeypatch, tmp_path):
+    conversation = _SwitchableConversation([RuntimeError("a real bug, not a provider problem")])
+    _stub_stream_task_dependencies(monkeypatch, conversation, tmp_path)
+
+    with pytest.raises(RuntimeError, match="a real bug"):
+        runner.stream_task(
+            "do the thing",
+            cfg=_cfg(
+                workspace=str(tmp_path),
+                model_selection="auto",
+                models_file=_write_catalog(tmp_path),
+                execution="local",
+            ),
+        )
+
+    assert conversation.switched_llms == []
+
+
+def test_quality_failure_escalates_during_verify_retry(monkeypatch, tmp_path):
+    conversation = _SwitchableConversation([None, None])
+    monkeypatch.setattr(runner, "Conversation", lambda **_kwargs: conversation)
+    monkeypatch.setattr(runner, "build_agent", lambda cfg, **_kw: "fake-agent")
+    monkeypatch.setattr(runner, "build_workspace", lambda cfg: nullcontext(str(tmp_path)))
+    monkeypatch.setattr(runner, "_enforce_task_tracker_completion", lambda *a, **kw: None)
+
+    failing = _run(_check(status="failed", summary="1 failed"))
+    passing = _run(_check(status="passed", summary="1 passed"))
+    results = iter([failing, passing])
+    monkeypatch.setattr(runner, "_run_verification", lambda _dir: next(results))
+
+    outcome = runner.stream_task(
+        "do the thing",
+        cfg=_cfg(
+            workspace=str(tmp_path),
+            model_selection="auto",
+            models_file=_write_catalog(tmp_path),
+            execution="local",
+        ),
+    )
+
+    assert len(conversation.switched_llms) == 1
+    kinds = [d.kind for d in outcome.model_decisions]
+    assert kinds == ["initial", "escalation_quality_failure"]
+    assert outcome.verification_state == "verified"

@@ -12,6 +12,14 @@ dependencies = [
     "openhands-sdk==1.47.0",
     "openhands-tools==1.47.0",
     "python-dotenv>=1.0",
+    # Already ships transitively via openhands-sdk — listed explicitly here
+    # since model_catalog.py imports it directly, not ad hoc. (runner.py's
+    # provider/API-failure detection for auto model selection uses the
+    # SDK's own openhands.sdk.llm.exceptions.types.LLMError instead of a
+    # LiteLLM/openai exception type directly — see ROADMAP.md's decisions
+    # log for why two earlier guesses at the right type were both wrong —
+    # so no extra LLM-library dependency is needed for that.)
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]

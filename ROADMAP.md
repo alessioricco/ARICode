@@ -97,7 +97,13 @@ build plan. This file is the living, evolving companion to that static plan.
   `build_agent()` now includes `_AUTONOMOUS_SUFFIX` conditionally — omitted
   when `cfg.interactive` is true, unconditional otherwise — every other
   suffix stays unconditional regardless of interactive mode; see the
-  matching `runner.py` entry and decisions log.
+  matching `runner.py` entry and decisions log. `build_agent()`/
+  `llm.py`'s `build_llm()` both also gained an optional `usage_id: str =
+  "harness"` parameter (defaulted, every existing call site unaffected) —
+  auto model selection gives each catalog candidate a distinct
+  `usage_id` so the SDK's LLM registry (keyed by `usage_id`, per
+  `switch_llm`'s own docstring) never confuses one candidate's config for
+  another's mid-task.
 - `runner.py` — `stream_task()` (callback-per-message) is the shared primitive;
   `run_task()` wraps it for the CLI's collect-and-return use case. Also now
   wires `cfg.max_iterations` into `Conversation(max_iteration_per_run=...)`
@@ -180,7 +186,27 @@ build plan. This file is the living, evolving companion to that static plan.
   next `_run_with_confirmation` call, so time spent waiting on a human
   reply is never charged against `HARNESS_MAX_TASK_SECONDS`. Has no effect
   without a caller-supplied callback — `cli.py` supplies one, `server.py`
-  never does.
+  never does. Also now wires `HARNESS_MODEL_SELECTION=auto` end to end: at
+  `stream_task` entry, loads the catalog, classifies the task, ranks
+  candidates into a `ModelChain`, resolves an interactive override if both
+  `cfg.interactive` and `on_model_choice` are given, and builds the initial
+  `Agent`/`LLM` from the chosen entry's config (via
+  `model_selection.config_for_entry` + `build_agent(usage_id=...)`) instead
+  of `cfg` directly — every other field (`workspace`, `execution`,
+  `confirm_mode`, ...) stays on the original, unmodified `cfg`. A new
+  `_run_conversation_once()` wraps every `conversation.run()` call
+  (threaded through `_run_with_confirmation`) in `try/except
+  ConversationRunError`, falling back through the chain on a provider/
+  API-level failure (see decisions log for what that actually means —
+  it took two rounds of live verification to find the right exception
+  type) and re-raising once exhausted. `_verify_and_report`/
+  `_enforce_task_tracker_completion` also advance the same chain — one
+  step per retry iteration — right before resending their own automated
+  followup message. `write_model_decisions()` runs in a `finally` block
+  around the whole task (not just on a normal return), so
+  `MODEL_DECISIONS.md` still captures the full escalation history even
+  when every candidate ultimately fails and the task raises — caught live,
+  not found by inspection (see decisions log).
 - `custom_tools/run_tests_tool.py` — a language-neutral verification
   pipeline in four explicit, independently-tested stages: **project
   detection** (`detect_project()`, one marker-file walk covering Python/
@@ -241,6 +267,36 @@ build plan. This file is the living, evolving companion to that static plan.
   mirroring `_confirm_pending_actions`'s self-contained print+prompt shape)
   as `run_task`'s `on_awaiting_input` — the CLI-only half of
   `runner.py`'s interactive checkpoint; `server.py` never supplies one.
+  `--auto-model` (off by default) sets `cfg.model_selection="auto"` and
+  passes `_prompt_for_model_choice` as `on_model_choice`, but only when
+  `--interactive` is *also* set — without it, auto-selection still runs,
+  just fully automatically (no prompt). See the matching `model_catalog.py`/
+  `model_selection.py`/`runner.py` entries below and MANUAL.md "Automatic
+  model selection".
+- `model_catalog.py` — pure data/parsing/scoring for `models.yaml`, no SDK
+  imports: `load_model_catalog(path)` parses and validates the file
+  (`ModelCatalogEntry` per model: `name`/`model`/`api_key`/`base_url`/
+  `reasoning_effort` mirroring `.env`'s `LLM_*` fields, plus `description`
+  and open-ended `ratings`); `classify_task(text, catalog)` matches task
+  text against `task_profiles`' keyword `triggers` (same deterministic,
+  no-extra-LLM-call pattern as skills' `KeywordTrigger`, first match wins,
+  `default` profile as fallback); `score_entry`/`rank_candidates` compute a
+  weighted sum over whatever axes a profile's `weights` declares (not
+  hardcoded to any fixed axis set) and sort descending. No minimum catalog
+  size enforced — a 1-entry catalog just has no fallback chain.
+- `model_selection.py` — the SDK-touching orchestration layer only
+  `runner.py` calls: `ModelChain` is a forward-only cursor over one task's
+  ranked candidates (computed once, per `rank_candidates`' docstring, never
+  re-scored), with `.advance()` logging a `ModelDecisionRecord` (never
+  carries `api_key`/`base_url`, only names/scores/reasons — always safe to
+  write/log) and returning `None` once exhausted;
+  `config_for_entry()`/`llm_for_entry()` reuse `config.override_llm()` +
+  `llm.build_llm()` exactly as they already exist (passing `""`, not
+  `None`, for a field the entry leaves unset, so a keyless local model
+  can't silently inherit a stale API key from a different provider — see
+  decisions log); `write_model_decisions()` (re)writes `MODEL_DECISIONS.md`
+  in the project workspace from the full decisions list every time it's
+  called, never appending, so it can't duplicate its own header.
 - `workspace.py` — single dispatch point for execution backends
   (`build_workspace(cfg)`); `local` returns a plain path, `docker` returns a
   `DockerWorkspace`, both as context managers so cleanup is automatic.
@@ -2008,3 +2064,126 @@ build plan. This file is the living, evolving companion to that static plan.
     loop preserves full conversation context across replies rather than
     starting fresh. Also verified the default (`--interactive` omitted)
     behaves byte-for-byte as before: no prompt, same autonomous flow.
+- **Deterministic auto model selection (`HARNESS_MODEL_SELECTION=auto`/
+  `--auto-model`): designed collaboratively over an extended conversation
+  before any code was written, per the user's own explicit "let's design
+  the solution first."** The user proposed a hand-curated catalog of
+  models rated on axes (reasoning, cost, precision, code, ...) with the
+  harness picking the best fit per task. Several real architectural forks
+  were resolved through discussion rather than picked unilaterally:
+  - **Deterministic weighted scoring, not an LLM-based router** (user's
+    explicit choice, after being asked directly) — no extra model call to
+    decide, consistent with this project's existing precedent against
+    adding an LLM call where a deterministic signal already suffices (see
+    the "Skills: two separate mechanisms" entry above, which rejected an
+    LLM classifier for the identical reason).
+  - **One static ranked list per task, computed once, walked forward under
+    either failure type — never re-classified or re-scored mid-task**
+    (the user confirmed this as "my suggestion" after a full explanation
+    of the tradeoff). The caveat this creates — falling back moves to the
+    next-best-*fit*, not necessarily a strictly more capable model — is
+    documented plainly in MANUAL.md rather than solved, since solving it
+    (re-weighting toward raw capability on a quality-triggered escalation
+    specifically) was explicitly deferred as a real v1.1 idea, not
+    silently absorbed into v1's scope.
+  - **No hard minimum catalog size** (the user reversed an initial
+    proposal to require ≥3 entries) — `rank_candidates()` just produces a
+    shorter chain with fewer models; a 1-entry catalog behaves like no
+    fallback chain at all rather than a config error.
+  - **Real API keys live directly in `models.yaml`, not indirected through
+    named env-var references** (the user's explicit choice over an
+    `api_key_env: SOME_VAR` alternative that was proposed) — so it needs
+    exactly `.env`'s own treatment: added to `.gitignore` next to `.env`/
+    `.env.local`/`secrets/`, and `models.yaml.example` (blank secrets) is
+    the committed template, matching the `.env`/`.env.example` split
+    exactly.
+  - **Task-profile weight vectors live in the same `models.yaml` file**
+    (not a separate config file, and not hardcoded harness policy) — the
+    user's answer covered both "models are configurable" and, by not
+    distinguishing them, implied the weighting logic should be too; kept
+    in one file since both describe "how a model gets chosen," the same
+    reasoning already applied to keeping ratings and descriptions
+    together on one entry.
+  - **Visibility: `MODEL_DECISIONS.md` in the project workspace** (the
+    user's explicit choice of format and placement — "markdown, give it a
+    standard name with .md extension" — over a JSON alternative that was
+    offered) plus the same records on `TaskOutcome.model_decisions` for
+    programmatic callers, matching the existing `completion_contract`/
+    `acceptance_results` precedent of always surfacing structured outcome
+    data both ways.
+  - **`server.py` needed zero code changes.** `HARNESS_MODEL_SELECTION`/
+    `HARNESS_MODELS_FILE` already flow through `_resolve_cfg`'s existing
+    `load_config()` → (optional per-request `override_llm`/`replace`) →
+    `stream_task(cfg=cfg, ...)` pipeline untouched, since none of those
+    steps ever drop or reset fields they don't explicitly touch. `on_model_
+    choice` is simply never passed, the same "no terminal to prompt at"
+    pattern already established for `on_confirm`/`on_awaiting_input` —
+    confirmed by tracing the actual call sites before writing any server.py
+    changes, not assumed, and none were needed. Surfacing
+    `model_decisions` through the persistent `TaskRecord`/SQL schema (for
+    `GET /tasks/{id}`) was deliberately **not** done in this pass — it
+    would need a real schema migration story for already-deployed
+    sqlite/mysql/postgres task stores that this change never asked for;
+    left as a genuine follow-up rather than an unplanned, unreviewed
+    schema change bundled into an unrelated feature.
+  - **Docker gets the initial pick but not mid-task fallback** — verified
+    directly against the SDK source (not assumed) that
+    `conversation.switch_llm`/`switch_profile`/`get_or_create_profile_llm`
+    exist on `LocalConversation` but not `RemoteConversation`'s Python
+    client, even though the remote agent-server's own REST API already
+    exposes a matching `switch_llm` endpoint server-side (its docstring
+    literally describes this harness's exact use case — an app-server that
+    owns the LLM directly). Building against `RemoteConversation`'s
+    private `_client`/`_id` attributes to call that endpoint directly was
+    considered and rejected — depending on undocumented, unstable internals
+    is exactly the SDK-drift risk this project's golden rule 2 exists to
+    avoid, for a gap that's realistically closed by an upstream SDK
+    release rather than a workaround. Documented as a plain, known
+    limitation (MANUAL.md "Docker") rather than worked around.
+  - **Finding the actual exception type to catch took two full rounds of
+    live verification, not one** — a genuinely instructive case of "verify,
+    don't assume" holding up under repeated testing, not just a single
+    check. First guess: `litellm.exceptions.APIError`. Wrong — inspecting
+    each concrete exception class's `__mro__` by *name only*
+    (`RateLimitError`, `APIStatusError`, `APIError`, ...) looked like a
+    match, but the fully-qualified classes revealed every one of them
+    actually subclasses the *same-named* class from the `openai` package,
+    not `litellm.exceptions`' own base. Second guess, corrected for that:
+    `openai.OpenAIError` (confirmed against all 20 of LiteLLM's own
+    declared `LITELLM_EXCEPTION_TYPES`, all of which really do subclass
+    it). Still wrong in production — caught only by an actual live
+    `conversation.run()` call against a deliberately invalid API key: the
+    SDK wraps every LLM-call failure in its *own*
+    `openhands.sdk.llm.exceptions.types.LLMError` hierarchy
+    (`LLMAuthenticationError`/`LLMRateLimitError`/`LLMTimeoutError`/
+    `LLMContextWindowExceedError`/`LLMServiceUnavailableError`/...) before
+    `ConversationRunError.original_exception` is ever set —
+    `openai.OpenAIError` and `litellm.exceptions.APIError` are both
+    invisible to that wrapping entirely. `LLMError` (the SDK's own,
+    already-a-direct-dependency type) is what `_run_conversation_once`
+    actually checks against — no extra `openai`/`litellm` dependency ended
+    up being needed in `pyproject.toml` at all, only `pyyaml` (for
+    `model_catalog.py`'s own YAML parsing).
+  - **`write_model_decisions()` runs in a `finally` block around the whole
+    task, not just after a normal return — a bug caught live, not by
+    inspection.** The first implementation wrote `MODEL_DECISIONS.md` only
+    at the end of `stream_task`'s normal control flow; a live run with a
+    deliberately-exhausted fallback chain (three candidates, all given
+    invalid keys) raised all the way out of `stream_task` before that line
+    ever executed, silently losing the *entire* escalation history for
+    exactly the case where a human debugging the failure needs it most.
+    Fixed by extracting the initial-run/interactive/retry phases into a
+    separate `_run_stream_task_phases()` helper and wrapping its call in
+    `try/finally`, writing whatever decisions had accumulated regardless
+    of whether the call returned or raised. Re-verified live against the
+    same three-candidate-all-invalid scenario after the fix:
+    `MODEL_DECISIONS.md` correctly shows all three attempts (`initial` +
+    two `escalation_api_failure` entries) before the final, real
+    `AuthenticationError` propagates to the caller.
+  - Verified live end-to-end against real API calls (not mocked
+    exceptions) with deliberately invalid keys across three real providers
+    (Anthropic ×2, OpenAI): the full cascade — `strong` (Anthropic) fails
+    → escalates to `balanced` (Anthropic) → fails → escalates to `cheap`
+    (OpenAI) → fails → chain exhausted, real `AuthenticationError`
+    re-raised — matched exactly what `MODEL_DECISIONS.md` and the terminal
+    output recorded, model-by-model, reason-by-reason.

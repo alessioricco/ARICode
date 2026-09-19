@@ -225,6 +225,7 @@ private/
 .env
 .env.local
 secrets/
+models.yaml
 
 # Claude Code personal overrides
 .claude/settings.local.json

@@ -16,6 +16,7 @@ from openhands.sdk.event import ActionEvent
 
 from .acceptance import AcceptanceCheck, AcceptanceCheckError, parse_acceptance_checks
 from .config import ConfigError, load_config, override_llm, resolve_project_dir
+from .model_catalog import ModelCatalogEntry
 from .runner import run_task
 from .skills import write_project_context
 
@@ -52,6 +53,34 @@ def _prompt_for_continuation(narrative: str) -> str | None:
         print(f"\n{narrative}\n")
     reply = input("Your reply (Enter to finish the task): ").strip()
     return reply or None
+
+
+def _prompt_for_model_choice(
+    candidates: list[ModelCatalogEntry], recommended_index: int, reason: str
+) -> int:
+    """Interactive terminal handler for `HARNESS_MODEL_SELECTION=auto`: shows
+    the full ranked candidate list and lets the user accept the recommended
+    one (Enter) or type the number of an alternative instead.
+    """
+    print(f"\n{reason}")
+    for i, entry in enumerate(candidates):
+        ratings = ", ".join(f"{axis}={value}" for axis, value in entry.ratings.items())
+        marker = " (recommended)" if i == recommended_index else ""
+        print(f"  [{i}] {entry.name}{marker} — {ratings}")
+        if entry.description:
+            print(f"      {entry.description}")
+    answer = input(
+        f"Use recommended model [{candidates[recommended_index].name}]? [Y/n or a number]: "
+    ).strip()
+    if not answer or answer.lower() in ("y", "yes"):
+        return recommended_index
+    try:
+        choice = int(answer)
+    except ValueError:
+        return recommended_index
+    if 0 <= choice < len(candidates):
+        return choice
+    return recommended_index
 
 
 def resolve_task_source(value: str) -> str:
@@ -203,6 +232,20 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--auto-model",
+        action="store_true",
+        help=(
+            "Pick the best-fit model for this task from a hand-curated "
+            "catalog (models.yaml, or HARNESS_MODELS_FILE), scored by task "
+            "type instead of always using LLM_MODEL. Falls back to the next "
+            "candidate on a provider-level failure (auth/rate-limit/outage) "
+            "or a failed verification/task_tracker retry. Combine with "
+            "--interactive to be prompted before each choice instead of it "
+            "deciding automatically. Off by default (current single-model "
+            "behavior unchanged)."
+        ),
+    )
+    parser.add_argument(
         "--require-verification",
         action="store_true",
         help=(
@@ -268,6 +311,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.interactive:
         cfg = replace(cfg, interactive=True)
 
+    if args.auto_model:
+        cfg = replace(cfg, model_selection="auto")
+
     if args.agents_md is not None and args.project is None:
         print("Error: --agents-md requires --project", file=sys.stderr)
         return 1
@@ -295,6 +341,9 @@ def main(argv: list[str] | None = None) -> int:
 
     on_confirm = _confirm_pending_actions if cfg.confirm_mode == "always" else None
     on_awaiting_input = _prompt_for_continuation if cfg.interactive else None
+    on_model_choice = (
+        _prompt_for_model_choice if (cfg.model_selection == "auto" and cfg.interactive) else None
+    )
     try:
         messages = run_task(
             task,
@@ -302,6 +351,7 @@ def main(argv: list[str] | None = None) -> int:
             on_confirm=on_confirm,
             acceptance_checks=acceptance_checks,
             on_awaiting_input=on_awaiting_input,
+            on_model_choice=on_model_choice,
         )
     except Exception as exc:  # noqa: BLE001 - surfaced as a clean CLI error, not a traceback
         print(f"Error: {exc}", file=sys.stderr)
@@ -328,6 +378,9 @@ def main(argv: list[str] | None = None) -> int:
     # is a real behavior change a caller must ask for, not a silent default
     # flip — see ROADMAP.md).
     outcome = messages.outcome
+    if outcome.model_decisions:
+        final = outcome.model_decisions[-1]
+        print(f"\nModel used: {final.chosen} (see MODEL_DECISIONS.md for the full history)")
     print(f"\nVerification: {outcome.verification_state}")
     for note in outcome.completion_contract.limitations:
         print(f"  - {note}")

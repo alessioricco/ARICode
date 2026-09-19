@@ -144,7 +144,12 @@ _LIFECYCLE_SKILLS_SUFFIX = (
 )
 
 
-def build_agent(cfg: Config) -> Agent:
+def build_agent(cfg: Config, *, usage_id: str = "harness") -> Agent:
+    # usage_id is forwarded to build_llm() unchanged (default preserves the
+    # single-model behavior everything used before). Auto model selection
+    # (see model_selection.py) passes a distinct usage_id per catalog
+    # candidate so the SDK's LLM registry never confuses one candidate's
+    # config for another's when runner.py later calls conversation.switch_llm.
     # HARNESS_INTERACTIVE=yes (cfg.interactive) drops _AUTONOMOUS_SUFFIX so
     # the agent may pause/ask instead of being told to always push forward
     # — the terminal-loop half that answers a question when it does is
@@ -170,7 +175,9 @@ def build_agent(cfg: Config) -> Agent:
         load_project_skills=True,
         system_message_suffix="\n\n".join(suffixes),
     )
-    agent = Agent(llm=build_llm(cfg), tools=build_tools(), agent_context=agent_context)
+    agent = Agent(
+        llm=build_llm(cfg, usage_id=usage_id), tools=build_tools(), agent_context=agent_context
+    )
     # HARNESS_CONFIRM_MODE == "always" should attach a confirmation policy that
     # pauses before each tool call. The confirmation-policy API is not yet
     # verified against this SDK version (see CLAUDE.md) — /verify-sdk before

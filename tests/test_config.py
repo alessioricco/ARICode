@@ -515,3 +515,32 @@ def test_interactive_accepts_false_spellings(value, expected):
 def test_invalid_interactive_raises():
     with pytest.raises(ConfigError, match="HARNESS_INTERACTIVE"):
         load_config(_base_env(HARNESS_INTERACTIVE="maybe"))
+
+
+# --- Deterministic auto model selection (HARNESS_MODEL_SELECTION) ----------
+
+
+def test_model_selection_defaults_to_manual():
+    cfg = load_config(_base_env())
+    assert cfg.model_selection == "manual"
+    assert cfg.models_file == "./models.yaml"
+
+
+def test_model_selection_accepts_auto():
+    cfg = load_config(_base_env(HARNESS_MODEL_SELECTION="auto"))
+    assert cfg.model_selection == "auto"
+
+
+def test_model_selection_is_case_insensitive():
+    cfg = load_config(_base_env(HARNESS_MODEL_SELECTION="AUTO"))
+    assert cfg.model_selection == "auto"
+
+
+def test_invalid_model_selection_raises():
+    with pytest.raises(ConfigError, match="HARNESS_MODEL_SELECTION"):
+        load_config(_base_env(HARNESS_MODEL_SELECTION="sometimes"))
+
+
+def test_models_file_defaults_and_override():
+    cfg = load_config(_base_env(HARNESS_MODELS_FILE="./custom-models.yaml"))
+    assert cfg.models_file == "./custom-models.yaml"

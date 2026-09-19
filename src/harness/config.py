@@ -23,6 +23,7 @@ EXECUTION_MODES = ("local", "docker")
 DOCKER_PLATFORMS = ("linux/amd64", "linux/arm64")
 VERIFY_TESTS_MODES = ("always", "never")
 TASK_STORE_BACKENDS = ("memory", "redis", "sqlite", "mysql", "postgres")
+MODEL_SELECTION_MODES = ("manual", "auto")
 
 DEFAULT_WORKSPACE = "."
 DEFAULT_MAX_ITERATIONS = 50
@@ -56,6 +57,10 @@ DEFAULT_TASK_STORE_POSTGRES_DATABASE = "harness"
 DEFAULT_TASK_STORE_REDIS_HOST = "localhost"
 DEFAULT_TASK_STORE_REDIS_PORT = 6379
 DEFAULT_TASK_STORE_REDIS_DB = 0
+
+# --- Deterministic auto model selection (see model_catalog.py) -------------
+DEFAULT_MODEL_SELECTION = "manual"  # one of MODEL_SELECTION_MODES
+DEFAULT_MODELS_FILE = "./models.yaml"
 
 
 class ConfigError(ValueError):
@@ -153,6 +158,13 @@ class Config:
     # effect there) — default false, current fully-autonomous behavior
     # unchanged.
     interactive: bool = False
+
+    # Deterministic auto model selection (see model_catalog.py/
+    # model_selection.py). Default ("manual") is byte-for-byte the
+    # pre-existing behavior — cfg.model is used exactly as it always has
+    # been; models_file is only ever read when model_selection == "auto".
+    model_selection: str = DEFAULT_MODEL_SELECTION  # one of MODEL_SELECTION_MODES
+    models_file: str = DEFAULT_MODELS_FILE
 
 
 def _clean(value: str | None) -> str | None:
@@ -362,6 +374,13 @@ def load_config(env: Mapping[str, str] | None = None, *, dotenv_path: str = ".en
         default=False,
         name="HARNESS_INTERACTIVE",
     )
+    model_selection = _parse_choice(
+        env.get("HARNESS_MODEL_SELECTION"),
+        default=DEFAULT_MODEL_SELECTION,
+        choices=MODEL_SELECTION_MODES,
+        name="HARNESS_MODEL_SELECTION",
+    )
+    models_file = _clean(env.get("HARNESS_MODELS_FILE")) or DEFAULT_MODELS_FILE
 
     return Config(
         model=model,
@@ -398,6 +417,8 @@ def load_config(env: Mapping[str, str] | None = None, *, dotenv_path: str = ".en
         task_store_redis_password=task_store_redis_password,
         task_store_redis_use_tls=task_store_redis_use_tls,
         interactive=interactive,
+        model_selection=model_selection,
+        models_file=models_file,
     )
 
 

@@ -41,3 +41,22 @@ def test_build_llm_passes_through_model_and_base_url():
 
     assert llm.model == "anthropic/claude-sonnet-4-5-20250929"
     assert llm.base_url == "http://localhost:11434"
+
+
+def test_build_llm_usage_id_defaults_to_harness():
+    cfg = load_config(_base_env())
+
+    llm = build_llm(cfg)
+
+    assert llm.usage_id == "harness"
+
+
+def test_build_llm_usage_id_is_overridable():
+    # Auto model selection (model_selection.py) gives each catalog candidate
+    # its own usage_id so the SDK's LLM registry never confuses one
+    # candidate's config for another's on a mid-task switch_llm() call.
+    cfg = load_config(_base_env())
+
+    llm = build_llm(cfg, usage_id="harness:deep-reasoner")
+
+    assert llm.usage_id == "harness:deep-reasoner"

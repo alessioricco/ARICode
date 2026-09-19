@@ -153,3 +153,18 @@ def test_interactive_mode_keeps_every_other_suffix():
     assert _NONINTERACTIVE_TOOLING_SUFFIX in suffix
     assert _VERIFY_BEFORE_FINISH_SUFFIX in suffix
     assert _LIFECYCLE_SKILLS_SUFFIX in suffix
+
+
+# --- usage_id passthrough (auto model selection) ----------------------------
+
+
+def test_build_agent_usage_id_defaults_to_harness():
+    agent = build_agent(_cfg())
+
+    assert agent.llm.usage_id == "harness"
+
+
+def test_build_agent_usage_id_is_overridable():
+    agent = build_agent(_cfg(), usage_id="harness:deep-reasoner")
+
+    assert agent.llm.usage_id == "harness:deep-reasoner"
