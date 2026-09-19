@@ -5,68 +5,315 @@
 # the default (manual), none of this is read — LLM_MODEL/LLM_API_KEY from
 # .env are used exactly as they are today. See MANUAL.md "Automatic model
 # selection" for the full writeup.
+#
+# =============================================================================
+# HOW RATINGS/WEIGHTS WORK — read this before scoring your own models
+# =============================================================================
+#
+# Each model below gets a `ratings` map (0-5, your own opinion — there's no
+# objective source, this is hand-curated). Each task profile (further down)
+# gets a `weights` map over the same axis names. A model's score for a task
+# is:
+#
+#     score = sum( rating[axis] * weight[axis] for axis in weights )
+#
+# computed for every model in the catalog, then sorted descending into a
+# ranked fallback chain — see rank_candidates()/score_entry() in
+# model_catalog.py. Highest score runs first; if it fails, the next one
+# down the list runs, and so on.
+#
+# CONVENTION — on every axis, HIGHER = MORE DESIRABLE. This includes `cost`:
+#   reasoning / precision / code   5 = excellent, 1 = weak     (as expected)
+#   cost                           5 = cheap / cost-effective, 1 = expensive
+#                                   (NOT "how much it costs" — the opposite!)
+#
+# Why `cost` is inverted: every weight in this file is positive, and scoring
+# is a plain weighted sum, so a positive weight always rewards a HIGHER
+# rating. If `cost` rated literal price (5 = priciest), a positive cost
+# weight would reward the *most expensive* model — backwards from what any
+# profile below actually wants. Rating it as cost-*effectiveness* instead
+# keeps every axis using the same arithmetic: positive weight always means
+# "more of this is better." If you add a custom axis, rate it the same way
+# (score it so a higher number is always the outcome you want) rather than
+# mixing conventions across axes.
+#
+# Axis names are open-ended, not fixed to reasoning/cost/precision/code —
+# add your own (e.g. `latency`, `context_window`) with zero code changes;
+# scoring just iterates whatever keys a task profile's `weights` declares.
+# A model that doesn't rate itself on an axis a profile weights contributes
+# 0 for that axis, not an error.
+#
+# Model ids/version numbers below are illustrative placeholders, not a
+# live/verified list — check your provider's + LiteLLM's current docs
+# before using one for real (see CLAUDE.md's "Model ID strings ... change
+# over time" gotcha).
+#
+# `activated` (bool, default true if omitted) lets you keep a large catalog
+# on file and toggle individual models on/off without deleting/re-adding
+# them: set it to `false` and rank_candidates() skips that model entirely
+# (not scored, never picked, never a fallback) — the entry stays in the
+# file, still validated, still counted for duplicate-name checks. Every
+# model in this template is `activated: true`; set a few to `false` to
+# match the providers/keys you actually have.
 
 models:
-  - name: claude-sonnet          # short id used in logs, prompts, MODEL_DECISIONS.md
-    model: anthropic/claude-sonnet-4-5-20250929   # same LiteLLM-style id as LLM_MODEL
-    api_key: ""                                    # same meaning as LLM_API_KEY
-    base_url: ""                                   # same meaning as LLM_BASE_URL (blank = provider default)
-    reasoning_effort: ""                            # same meaning as LLM_REASONING_EFFORT (blank = SDK default)
-    description: >
-      Strong, well-rounded coding model. Good default for most tasks;
-      reliable at multi-step reasoning without being the most expensive
-      option.
-    ratings:                     # 0-5, hand-curated — no objective source, these are opinions
-      reasoning: 4
-      cost: 3
-      precision: 4
-      code: 4
+  # ---------------------------------------------------------------------------
+  # ANTHROPIC — CORE CATALOG
+  # ---------------------------------------------------------------------------
 
-  - name: gpt-4o
-    model: openai/gpt-4o
+  - name: claude-opus-5              # short id used in logs, prompts, MODEL_DECISIONS.md
+    model: anthropic/claude-opus-5   # same LiteLLM-style id as LLM_MODEL
+    api_key: ""                      # same meaning as LLM_API_KEY
+    base_url: ""                     # same meaning as LLM_BASE_URL (blank = provider default)
+    reasoning_effort: ""             # same meaning as LLM_REASONING_EFFORT (blank = SDK default; common values: none/minimal/low/medium/high/xhigh/max)
+    description: >
+      Flagship model — the strongest option for hard, multi-step reasoning
+      and the trickiest code. Reach for it on gnarly debugging and large
+      refactors where correctness beats speed. Most expensive per token,
+      so it's overkill for routine work.
+    ratings: {reasoning: 5, cost: 1, precision: 5, code: 5}
+    activated: true
+
+  - name: claude-sonnet-5
+    model: anthropic/claude-sonnet-5
     api_key: ""
     base_url: ""
     reasoning_effort: ""
     description: >
-      Fast, broadly capable general-purpose model. Comparable tier to
-      claude-sonnet above; keep both in the catalog to get real fallback
-      diversity if one provider has an outage.
-    ratings:
-      reasoning: 4
-      cost: 3
-      precision: 4
-      code: 4
+      Best all-round default. Near-Opus quality on coding and agentic work
+      at a much friendlier price and latency. Good first choice for most
+      tasks; only escalate to Opus 5 when it visibly struggles.
+    ratings: {reasoning: 4, cost: 3, precision: 4, code: 5}
+    activated: true
+
+  - name: claude-haiku
+    model: anthropic/claude-haiku-4-5-20251001
+    api_key: ""
+    base_url: ""
+    reasoning_effort: ""
+    description: >
+      Fast and cheap. Great for scaffolding, boilerplate, simple edits, and
+      high-volume throwaway calls. Weaker on deep reasoning and large
+      codebases — expect it to fall through to a better-rated model on
+      anything complex.
+    ratings: {reasoning: 3, cost: 4, precision: 3, code: 3}
+    activated: true
+
+  - name: claude-opus-4-8
+    model: anthropic/claude-opus-4-8
+    api_key: ""
+    base_url: ""
+    reasoning_effort: ""
+    description: >
+      Previous-generation flagship, still fully available. Keep it in the
+      catalog for fallback diversity — if Opus 5 is unavailable or rate
+      limited, this is the closest drop-in for high-reasoning, high-code
+      tasks. Priced in the same premium tier as Opus 5.
+    ratings: {reasoning: 5, cost: 1, precision: 4, code: 4}
+    activated: true
+
+  # ---------------------------------------------------------------------------
+  # OPENAI — FRONTIER / MAXIMUM QUALITY
+  # ---------------------------------------------------------------------------
+
+  - name: gpt-6-astra
+    model: openai/gpt-6-astra
+    api_key: ""
+    base_url: ""
+    reasoning_effort: "high"
+    description: >
+      OpenAI's current flagship model for the hardest end-to-end work. Best
+      choice when correctness, deep reasoning, complex coding, agentic
+      execution, and difficult knowledge work matter more than cost or
+      latency.
+    ratings: {reasoning: 5, cost: 1, precision: 5, code: 5}
+    activated: true
+
+  - name: gpt-5.6-sol
+    model: openai/gpt-5.6-sol
+    api_key: ""
+    base_url: ""
+    reasoning_effort: "high"
+    description: >
+      Frontier GPT-5.6 model for complex professional work, advanced coding,
+      long-horizon reasoning, research, and agentic workflows. Stronger
+      price-performance than the previous flagship generation.
+    ratings: {reasoning: 5, cost: 2, precision: 5, code: 5}
+    activated: true
+
+  # ---------------------------------------------------------------------------
+  # OPENAI — BALANCED / GENERAL PURPOSE
+  # ---------------------------------------------------------------------------
+
+  - name: gpt-5.6-terra
+    model: openai/gpt-5.6-terra
+    api_key: ""
+    base_url: ""
+    reasoning_effort: "medium"
+    description: >
+      Balanced GPT-5.6 model for everyday professional work. Designed to
+      trade some frontier capability for substantially lower cost while
+      retaining strong reasoning, coding, tool use, and long-context
+      performance. Good default for most non-trivial tasks.
+    ratings: {reasoning: 4, cost: 4, precision: 4, code: 4}
+    activated: true
+
+  # ---------------------------------------------------------------------------
+  # OPENAI — LOW COST / HIGH VOLUME
+  # ---------------------------------------------------------------------------
+
+  - name: gpt-5.6-luna
+    model: openai/gpt-5.6-luna
+    api_key: ""
+    base_url: ""
+    reasoning_effort: "medium"
+    description: >
+      Fast, highly cost-efficient GPT-5.6 model for high-volume workloads,
+      simple reasoning, classification, extraction, transformations,
+      lightweight coding, and first-pass agent work. Good cheap first
+      attempt before escalating to Terra or Sol.
+    ratings: {reasoning: 3, cost: 5, precision: 3, code: 3}
+    activated: true
+
+  # ---------------------------------------------------------------------------
+  # OPENAI — PREVIOUS GENERATION (KEEP FOR FALLBACK / COMPARISON)
+  # ---------------------------------------------------------------------------
+
+  - name: gpt-5.5
+    model: openai/gpt-5.5
+    api_key: ""
+    base_url: ""
+    reasoning_effort: "high"
+    description: >
+      Previous-generation frontier GPT model. Still highly capable for
+      reasoning and coding, but generally superseded by GPT-5.6 Sol/Terra.
+      Useful as a compatibility or provider-fallback option.
+    ratings: {reasoning: 4, cost: 3, precision: 4, code: 5}
+    activated: true
+
+  - name: gpt-5.4
+    model: openai/gpt-5.4
+    api_key: ""
+    base_url: ""
+    reasoning_effort: "medium"
+    description: >
+      Previous-generation general-purpose reasoning model. Useful when a
+      stable GPT-5.x fallback is desirable or when workloads do not require
+      the newest generation.
+    ratings: {reasoning: 4, cost: 4, precision: 4, code: 4}
+    activated: true
+
+  - name: gpt-5.4-mini
+    model: openai/gpt-5.4-mini
+    api_key: ""
+    base_url: ""
+    reasoning_effort: "medium"
+    description: >
+      Smaller and cheaper GPT-5.4 model for well-defined tasks, routine
+      coding, structured transformations, classification, and high-volume
+      workloads where frontier reasoning is unnecessary.
+    ratings: {reasoning: 3, cost: 5, precision: 3, code: 3}
+    activated: true
+
+  # ---------------------------------------------------------------------------
+  # OPENAI — LEGACY GENERAL PURPOSE
+  # ---------------------------------------------------------------------------
+
+  - name: gpt-4.1
+    model: openai/gpt-4.1
+    api_key: ""
+    base_url: ""
+    reasoning_effort: ""
+    description: >
+      Strong non-reasoning GPT model. Useful for fast instruction following,
+      structured generation, coding, and workloads where explicit reasoning
+      models are unnecessary. Retain primarily for compatibility.
+    ratings: {reasoning: 3, cost: 3, precision: 4, code: 4}
+    activated: true
+
+  - name: gpt-4.1-mini
+    model: openai/gpt-4.1-mini
+    api_key: ""
+    base_url: ""
+    reasoning_effort: ""
+    description: >
+      Smaller, faster GPT-4.1 model for inexpensive routine tasks,
+      extraction, classification, transformation, and straightforward code
+      generation.
+    ratings: {reasoning: 2, cost: 5, precision: 3, code: 3}
+    activated: true
+
+  # ---------------------------------------------------------------------------
+  # LOCAL / SELF-HOSTED (OPTIONAL)
+  # ---------------------------------------------------------------------------
 
   - name: ollama-local
     model: ollama/llama3
-    api_key: ""                  # local models are typically keyless
+    api_key: ""                              # local models are typically keyless
     base_url: "http://localhost:11434"
     reasoning_effort: ""
     description: >
-      Local, self-hosted, effectively free to run — but noticeably weaker
-      at complex reasoning and less reliable on larger codebases. Good
-      first attempt for trivial/cheap tasks; expect it to often fall
-      through to a better-rated model in the chain.
-    ratings:
-      reasoning: 2
-      cost: 5
-      precision: 2
-      code: 2
+      Local, self-hosted, effectively free to run — but noticeably weaker at
+      complex reasoning and less reliable on larger codebases. Good for
+      trivial, privacy-sensitive, or offline tasks; expect it to often fall
+      through to a better-rated model in the chain on anything complex.
+    ratings: {reasoning: 2, cost: 5, precision: 2, code: 2}
+    activated: true
 
+# =============================================================================
+# DETERMINISTIC TASK -> WEIGHT-VECTOR CLASSIFICATION
+# =============================================================================
+#
 # Deterministic (no LLM call) task -> weight-vector classification, reused
-# from this harness's existing KeywordTrigger pattern (see skills/). First
-# matching profile wins; "default" applies when nothing else matches. Add
-# your own axes/profiles freely — scoring just sums whatever keys a
-# profile's weights declare, nothing here is hardcoded to these four names.
+# from this harness's existing KeywordTrigger pattern (see skills/). The task
+# text is matched against each profile's `triggers` (case-insensitive
+# substring match) IN THE ORDER PROFILES ARE DECLARED BELOW — the first one
+# that matches wins, so put a more specific profile earlier if its triggers
+# could also appear in a broader one. `default` is the fallback when nothing
+# else matches; its own position doesn't matter for that purpose, but keep it
+# last for readability.
+#
+# Add your own axes/profiles freely — scoring just sums whatever keys a
+# profile's `weights` declares against whatever `ratings` each model
+# provides (see the ratings/weights note at the top of this file for how
+# `cost` in particular is scored).
+
 task_profiles:
+  # High correctness + deep reasoning + coding.
   debugging:
-    triggers: [fix, bug, crash, "failing test", "race condition", debug, error]
-    weights: {reasoning: 3, precision: 2, code: 1, cost: 0.5}
+    triggers: [fix, bug, crash, "failing test", "race condition", debug, debugging, error, exception, regression]
+    weights: {reasoning: 3, precision: 2, code: 2, cost: 0.5}
+
+  # Cheap generation/scaffolding. Don't waste frontier inference here.
   scaffolding:
-    triggers: [scaffold, "create a new", "set up", boilerplate, initialize, "starter project"]
+    triggers: [scaffold, "create a new", "set up", setup, boilerplate, initialize, initialization, "starter project", template, prototype]
     weights: {cost: 2, code: 1, reasoning: 0.5, precision: 0.5}
+
+  # Code quality matters more than raw generation speed.
   refactor:
-    triggers: [refactor, "clean up", simplify, restructure]
+    triggers: [refactor, "clean up", simplify, restructure, redesign, optimize, modernization]
     weights: {code: 2, precision: 2, reasoning: 1, cost: 0.5}
+
+  # Architecture needs stronger reasoning and precision.
+  architecture:
+    triggers: [architecture, "system design", "design system", "technical design", "architecture decision", ADR, "distributed system", scalability, "data architecture"]
+    weights: {reasoning: 3, precision: 3, code: 1, cost: 0.5}
+
+  # Research / analysis favors reasoning and precision.
+  research:
+    triggers: [research, analyze, analysis, investigate, compare, evaluate, "deep dive", "trade-off", "tradeoff"]
+    weights: {reasoning: 3, precision: 3, code: 0.5, cost: 0.5}
+
+  # High-volume mechanical work should bias heavily toward cheap models.
+  extraction:
+    triggers: [extract, extraction, classify, classification, categorize, normalize, transform, parse, summarize]
+    weights: {cost: 3, precision: 2, reasoning: 0.5, code: 0}
+
+  # Agentic tasks need reasoning + code, with cost still relevant.
+  agent:
+    triggers: [agent, agentic, "multi-step", "long-running", "tool use", tools, automate, automation, workflow]
+    weights: {reasoning: 3, code: 2, precision: 2, cost: 1}
+
+  # Default balanced profile — used when nothing above matches.
   default:
     weights: {reasoning: 1, cost: 1, precision: 1, code: 1}

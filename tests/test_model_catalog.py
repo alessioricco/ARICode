@@ -84,6 +84,55 @@ def test_loads_full_catalog_with_profiles(tmp_path):
     assert {p.name for p in catalog.task_profiles} == {"debugging", "scaffolding", "default"}
 
 
+# --- activated ---------------------------------------------------------
+
+
+def test_activated_defaults_to_true_when_omitted(tmp_path):
+    catalog = load_model_catalog(_write(tmp_path, _MINIMAL_YAML))
+
+    assert catalog.models[0].activated is True
+
+
+def test_activated_false_is_parsed(tmp_path):
+    path = _write(
+        tmp_path,
+        "models:\n  - name: foo\n    model: openai/gpt-4o\n    activated: false\n",
+    )
+    catalog = load_model_catalog(path)
+
+    assert catalog.models[0].activated is False
+
+
+def test_activated_true_is_parsed(tmp_path):
+    path = _write(
+        tmp_path,
+        "models:\n  - name: foo\n    model: openai/gpt-4o\n    activated: true\n",
+    )
+    catalog = load_model_catalog(path)
+
+    assert catalog.models[0].activated is True
+
+
+def test_non_boolean_activated_raises(tmp_path):
+    path = _write(
+        tmp_path,
+        "models:\n  - name: foo\n    model: openai/gpt-4o\n    activated: maybe\n",
+    )
+    with pytest.raises(ModelCatalogError, match="'activated'"):
+        load_model_catalog(path)
+
+
+def test_duplicate_name_still_raises_when_one_is_deactivated(tmp_path):
+    path = _write(
+        tmp_path,
+        "models:\n"
+        "  - name: dup\n    model: openai/gpt-4o\n    activated: false\n"
+        "  - name: dup\n    model: anthropic/claude-sonnet-4-5-20250929\n",
+    )
+    with pytest.raises(ModelCatalogError, match="duplicate model name"):
+        load_model_catalog(path)
+
+
 # --- load_model_catalog: error paths -------------------------------------
 
 
@@ -260,3 +309,24 @@ def test_rank_candidates_works_with_a_single_model_catalog():
     ranked = rank_candidates(catalog, {"reasoning": 1})
 
     assert ranked == [only]
+
+
+def test_rank_candidates_excludes_deactivated_models():
+    active = ModelCatalogEntry(name="active", model="x", ratings={"reasoning": 1})
+    inactive = ModelCatalogEntry(
+        name="inactive", model="y", ratings={"reasoning": 5}, activated=False
+    )
+    catalog = ModelCatalog(models=[active, inactive], task_profiles=[])
+
+    ranked = rank_candidates(catalog, {"reasoning": 1})
+
+    # inactive scores higher (5 vs 1) but must still be excluded entirely.
+    assert ranked == [active]
+
+
+def test_rank_candidates_raises_when_every_model_is_deactivated():
+    only = ModelCatalogEntry(name="only", model="x", ratings={"reasoning": 3}, activated=False)
+    catalog = ModelCatalog(models=[only], task_profiles=[])
+
+    with pytest.raises(ModelCatalogError, match="activated"):
+        rank_candidates(catalog, {"reasoning": 1})

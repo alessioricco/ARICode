@@ -290,14 +290,17 @@ build plan. This file is the living, evolving companion to that static plan.
 - `model_catalog.py` — pure data/parsing/scoring for `models.yaml`, no SDK
   imports: `load_model_catalog(path)` parses and validates the file
   (`ModelCatalogEntry` per model: `name`/`model`/`api_key`/`base_url`/
-  `reasoning_effort` mirroring `.env`'s `LLM_*` fields, plus `description`
-  and open-ended `ratings`); `classify_task(text, catalog)` matches task
-  text against `task_profiles`' keyword `triggers` (same deterministic,
-  no-extra-LLM-call pattern as skills' `KeywordTrigger`, first match wins,
-  `default` profile as fallback); `score_entry`/`rank_candidates` compute a
-  weighted sum over whatever axes a profile's `weights` declares (not
-  hardcoded to any fixed axis set) and sort descending. No minimum catalog
-  size enforced — a 1-entry catalog just has no fallback chain.
+  `reasoning_effort` mirroring `.env`'s `LLM_*` fields, plus `description`,
+  open-ended `ratings`, and `activated` — bool, default `true`);
+  `classify_task(text, catalog)` matches task text against `task_profiles`'
+  keyword `triggers` (same deterministic, no-extra-LLM-call pattern as
+  skills' `KeywordTrigger`, first match wins, `default` profile as
+  fallback); `score_entry`/`rank_candidates` compute a weighted sum over
+  whatever axes a profile's `weights` declares (not hardcoded to any fixed
+  axis set) and sort descending, skipping any entry with `activated: false`
+  entirely (never scored, never a fallback candidate) — raises if that
+  leaves nothing activated. No minimum catalog size enforced — a 1-entry
+  catalog just has no fallback chain.
 - `model_selection.py` — the SDK-touching orchestration layer only
   `runner.py` calls: `ModelChain` is a forward-only cursor over one task's
   ranked candidates (computed once, per `rank_candidates`' docstring, never
@@ -2329,3 +2332,25 @@ build plan. This file is the living, evolving companion to that static plan.
   `src/`, confirmed both when first noticed (during item #21's
   `detect_project()` rework, which didn't need it either) and again
   immediately before deleting it. Full suite (536 tests) unaffected.
+- **`models.yaml` gained a per-model `activated` (bool, default `true`)
+  field — filtered in `rank_candidates()`, not at `load_model_catalog()`
+  parse time.** User request, to maintain a large candidate catalog and
+  toggle individual models on/off (e.g. a provider they don't currently
+  have a key for) without deleting/re-adding entries. Filtering happens in
+  `rank_candidates()` rather than dropping deactivated entries from
+  `ModelCatalog.models` at load time: a deactivated entry still needs
+  full schema validation and still needs to participate in
+  `load_model_catalog()`'s duplicate-name check (an inactive entry sharing
+  a name with an active one is still a real config mistake worth catching
+  immediately, not just once it's re-activated) — dropping it earlier
+  would have hidden both. Raises `ModelCatalogError` if every model ends
+  up deactivated (rather than propagating `ModelChain`'s generic "requires
+  at least one candidate" `ValueError`), since that's a specific,
+  actionable, easily-made mistake (toggling off the last active model)
+  that deserves a message naming the actual cause. Verified live against
+  the real `models.yaml.example` (14 models, all `activated: true`
+  parsing correctly) plus targeted unit tests for the omitted/explicit-
+  true/explicit-false/non-boolean parse cases, the duplicate-name check
+  still firing when one of the two duplicates is deactivated, and
+  `rank_candidates()` both excluding a higher-scoring deactivated entry
+  and raising when every entry is deactivated.

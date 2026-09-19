@@ -14,6 +14,12 @@ Rating/weight axes are deliberately open-ended, not hardcoded to a fixed set
 (`reasoning`/`cost`/`precision`/`code` are just the template's example) —
 scoring iterates whatever keys a task profile's `weights` declares, so a
 user can add a new axis with zero code changes.
+
+Each model entry also has `activated` (bool, default `true`) — a
+deactivated entry stays in the file (still schema-validated, still counted
+for duplicate-name checks) but is excluded from `rank_candidates()`'s
+scoring/output entirely, letting a user maintain a large catalog and
+toggle individual models on/off without deleting or re-adding entries.
 """
 
 from __future__ import annotations
@@ -46,6 +52,7 @@ class ModelCatalogEntry:
     reasoning_effort: str | None = None
     description: str = ""
     ratings: dict[str, float] = field(default_factory=dict)
+    activated: bool = True
 
 
 @dataclass(frozen=True)
@@ -100,6 +107,15 @@ def _parse_ratings(data: dict, *, context: str) -> dict[str, float]:
     return ratings
 
 
+def _parse_activated(data: dict, *, context: str) -> bool:
+    if "activated" not in data:
+        return True
+    value = data["activated"]
+    if not isinstance(value, bool):
+        raise ModelCatalogError(f"{context}: 'activated' must be true or false, got {value!r}.")
+    return value
+
+
 def _parse_model_entry(data: Any) -> ModelCatalogEntry:
     if not isinstance(data, dict):
         raise ModelCatalogError("Each entry under 'models' must be a mapping.")
@@ -114,6 +130,7 @@ def _parse_model_entry(data: Any) -> ModelCatalogEntry:
         reasoning_effort=_optional_str(data, "reasoning_effort"),
         description=(_optional_str(data, "description") or ""),
         ratings=_parse_ratings(data, context=context),
+        activated=_parse_activated(data, context=context),
     )
 
 
@@ -148,9 +165,10 @@ def _parse_task_profile(name: str, data: Any) -> TaskProfile:
 def load_model_catalog(path: str) -> ModelCatalog:
     """Parse `models.yaml`. Raises `ModelCatalogError` for a missing file, a
     file that isn't valid YAML, or one that fails schema validation (a
-    non-empty 'models' list, each with 'name'/'model'; profiles are
-    optional). No minimum catalog size is enforced — see
-    `rank_candidates()`'s docstring for why."""
+    non-empty 'models' list, each with 'name'/'model'; 'activated' defaults
+    to `true` if omitted; profiles are optional). No minimum catalog size is
+    enforced — see `rank_candidates()`'s docstring for why (and for what
+    happens when every model is deactivated)."""
     file_path = Path(path)
     if not file_path.is_file():
         raise ModelCatalogError(
@@ -212,12 +230,26 @@ def score_entry(entry: ModelCatalogEntry, weights: dict[str, float]) -> float:
 
 
 def rank_candidates(catalog: ModelCatalog, weights: dict[str, float]) -> list[ModelCatalogEntry]:
-    """Every catalog model, scored against `weights` and sorted descending
-    (stable — ties keep the file's declared order, via Python's stable sort
-    over the already-declaration-ordered `catalog.models`).
+    """Every *activated* catalog model, scored against `weights` and sorted
+    descending (stable — ties keep the file's declared order, via Python's
+    stable sort over the already-declaration-ordered `catalog.models`).
 
-    No minimum length is enforced: a 1- or 2-model catalog just produces a
-    correspondingly short fallback chain, never an error — a user is free to
-    add more models later without hitting a hidden validation cliff.
+    A model with `activated: false` is skipped entirely — not scored, not
+    returned, never a fallback candidate — so a user can keep a large
+    catalog on file and toggle individual models on/off without deleting or
+    re-adding entries.
+
+    No minimum length is enforced beyond "at least one activated model": a
+    1- or 2-model catalog just produces a correspondingly short fallback
+    chain, never an error for the model *count* — a user is free to add more
+    models later without hitting a hidden validation cliff. Raises
+    `ModelCatalogError` only if every model in the catalog is deactivated,
+    since that leaves nothing to select from at all.
     """
-    return sorted(catalog.models, key=lambda entry: score_entry(entry, weights), reverse=True)
+    active = [entry for entry in catalog.models if entry.activated]
+    if not active:
+        raise ModelCatalogError(
+            "Every model in the catalog has 'activated: false' — set at "
+            "least one to 'true' before using HARNESS_MODEL_SELECTION=auto."
+        )
+    return sorted(active, key=lambda entry: score_entry(entry, weights), reverse=True)

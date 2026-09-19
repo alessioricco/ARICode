@@ -282,6 +282,7 @@ models:
     reasoning_effort: ""                            # same meaning as LLM_REASONING_EFFORT
     description: "Strong, well-rounded coding model."
     ratings: {reasoning: 4, cost: 3, precision: 4, code: 4}   # 0-5, hand-curated
+    activated: true                                 # false = excluded from selection entirely
 
 task_profiles:
   debugging:
@@ -295,6 +296,24 @@ Rating/weight axes are open-ended, not fixed to `reasoning`/`cost`/
 `precision`/`code` — add your own with no code changes, scoring just sums
 whatever a `task_profiles` entry's `weights` declares. No minimum number of
 models is required; one entry just means no fallback chain.
+
+**`activated` (default `true` if omitted) lets you keep a candidate on file
+but exclude it from selection** — set it to `false` to disable a model
+without deleting its entry (e.g. you don't currently have that provider's
+key, or you just don't want it in rotation right now); flip it back to
+`true` to bring it back. A deactivated entry is still schema-validated and
+still counted for duplicate-name checks, but never scored, ranked, or used
+as a fallback. If every model in the catalog is deactivated,
+`HARNESS_MODEL_SELECTION=auto` fails with a clear error rather than
+silently picking nothing.
+
+**On every axis, higher = more desirable — including `cost`.** A model's
+score is `sum(rating[axis] * weight[axis])`, and every profile's weights are
+positive, so a higher rating is always rewarded. That makes `cost` mean
+*cost-effectiveness*, not literal price: `cost: 5` is a cheap model, `cost:
+1` is an expensive one — the reverse of a "how much does this cost" reading.
+See the longer note at the top of `models.yaml.example` before hand-scoring
+your own catalog.
 
 ### How a model is picked
 
