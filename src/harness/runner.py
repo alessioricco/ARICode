@@ -8,8 +8,10 @@ from __future__ import annotations
 import os
 import re
 import time
+import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 
 from openhands.sdk import (
     Conversation,
@@ -28,6 +30,7 @@ from openhands.tools.task_tracker import TaskTrackerTool
 
 from .acceptance import AcceptanceCheck, AcceptanceCheckResult, evaluate_acceptance_checks
 from .agent import build_agent
+from .artifacts import write_run_artifacts
 from .config import Config, load_config
 from .custom_tools.run_tests_tool import CheckOutcome, VerificationRun, run_full_verification
 from .model_catalog import classify_task, load_model_catalog, rank_candidates
@@ -1005,6 +1008,8 @@ def stream_task(
     acceptance_checks: Sequence[AcceptanceCheck] | None = None,
     on_awaiting_input: OnAwaitingInput | None = None,
     on_model_choice: OnModelChoice | None = None,
+    run_id: str | None = None,
+    project: str | None = None,
 ) -> TaskOutcome:
     """Run a task, invoking `on_message` with each message as it's produced,
     and return the terminal `TaskOutcome` once verification has settled.
@@ -1021,17 +1026,29 @@ def stream_task(
     autonomous even in interactive mode. `on_model_choice` is only consulted
     when both `cfg.model_selection == "auto"` and `cfg.interactive` are
     true — see model_selection.py's `ModelChain` for the deterministic
-    scoring/fallback-chain design.
+    scoring/fallback-chain design. `run_id` names this run's subfolder under
+    `HARNESS_ARTIFACTS_DIR` (see `artifacts.py`) — `server.py` passes its
+    own `TaskRecord.id` so a task's artifacts folder matches `GET
+    /tasks/{id}`; every other caller gets one minted automatically when
+    `cfg.artifacts_dir` is set. Has no effect at all when it's unset.
+    `project` is the same project name `cli.py --project`/`server.py`'s
+    `project` request field already resolve into `cfg.workspace` before
+    calling this. `Config` has no field for the name itself (only the
+    already-resolved workspace path), so a caller that knows it passes it
+    again here, purely to bucket this run's artifacts folder the same way
+    `HARNESS_PROJECTS_DIR` is bucketed.
     """
     if cfg is None:
         cfg = load_config()
     emit = on_message or (lambda _msg: None)
     checkpoint_buffer: list[Message] = []
+    all_messages: list[Message] = []
 
     def on_event(event: Event) -> None:
         if isinstance(event, LLMConvertibleEvent):
             message = event.to_llm_message()
             checkpoint_buffer.append(message)
+            all_messages.append(message)
             emit(message)
 
     # HARNESS_MODEL_SELECTION=auto: pick the best-fit catalog candidate for
@@ -1083,6 +1100,16 @@ def stream_task(
         # from the SDK. See _run_with_confirmation's docstring and
         # ROADMAP.md's decisions log for the exact multiplication this closes.
         deadline = time.monotonic() + cfg.max_task_seconds
+
+        # HARNESS_ARTIFACTS_DIR: mint a run id up front (server.py passes its
+        # own TaskRecord.id instead, so a task's folder matches GET
+        # /tasks/{id}) and record wall-clock start — a no-op when unset.
+        if cfg.artifacts_dir:
+            run_id = run_id or str(uuid.uuid4())
+            started_at = datetime.now(UTC).isoformat()
+
+        outcome: TaskOutcome | None = None
+        captured_error: BaseException | None = None
         try:
             outcome = _run_stream_task_phases(
                 conversation,
@@ -1095,6 +1122,9 @@ def stream_task(
                 model_chain,
                 checkpoint_buffer,
             )
+        except BaseException as exc:  # recorded for artifacts.py, then always re-raised as-is
+            captured_error = exc
+            raise
         finally:
             # Written even when a phase raises (e.g. every candidate in an
             # auto-selection chain failed at the API level) — that's exactly
@@ -1102,6 +1132,29 @@ def stream_task(
             # the live repro this fixed in ROADMAP.md's decisions log.
             if model_chain is not None:
                 write_model_decisions(cfg.workspace, model_chain.decisions)
+            if cfg.artifacts_dir:
+                stats = conversation.conversation_stats
+                write_run_artifacts(
+                    artifacts_dir=cfg.artifacts_dir,
+                    run_id=run_id,
+                    project=project,
+                    task=task,
+                    execution=cfg.execution,
+                    model=(
+                        model_chain.current.model if model_chain is not None else agent_cfg.model
+                    ),
+                    model_selection=cfg.model_selection,
+                    started_at=started_at,
+                    ended_at=datetime.now(UTC).isoformat(),
+                    messages=[m.model_dump(mode="json") for m in all_messages],
+                    outcome=outcome,
+                    error=(str(captured_error) if captured_error is not None else None),
+                    combined_metrics=stats.get_combined_metrics().get(),
+                    per_model_metrics={
+                        usage_id: metrics.get()
+                        for usage_id, metrics in stats.usage_to_metrics.items()
+                    },
+                )
         outcome = _apply_acceptance_checks(outcome, cfg, emit, acceptance_checks)
         if model_chain is not None:
             outcome = replace(outcome, model_decisions=tuple(model_chain.decisions))
@@ -1175,6 +1228,8 @@ def run_task(
     acceptance_checks: Sequence[AcceptanceCheck] | None = None,
     on_awaiting_input: OnAwaitingInput | None = None,
     on_model_choice: OnModelChoice | None = None,
+    run_id: str | None = None,
+    project: str | None = None,
 ) -> TaskResult:
     messages: list = []
     outcome = stream_task(
@@ -1185,5 +1240,7 @@ def run_task(
         acceptance_checks=acceptance_checks,
         on_awaiting_input=on_awaiting_input,
         on_model_choice=on_model_choice,
+        run_id=run_id,
+        project=project,
     )
     return TaskResult(messages, outcome)  # last message is the final assistant output

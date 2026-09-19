@@ -352,6 +352,7 @@ def main(argv: list[str] | None = None) -> int:
             acceptance_checks=acceptance_checks,
             on_awaiting_input=on_awaiting_input,
             on_model_choice=on_model_choice,
+            project=args.project,
         )
     except Exception as exc:  # noqa: BLE001 - surfaced as a clean CLI error, not a traceback
         print(f"Error: {exc}", file=sys.stderr)

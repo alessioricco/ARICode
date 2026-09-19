@@ -20,6 +20,7 @@ reference — how to actually run and configure the thing.
 - [CLI reference](#cli-reference)
 - [Interactive mode](#interactive-mode)
 - [Automatic model selection](#automatic-model-selection)
+- [Run artifacts](#run-artifacts)
 - [Server mode (HTTP/WebSocket)](#server-mode-httpwebsocket)
 - [Task registry persistence](#task-registry-persistence)
 - [Projects: one subfolder per generated project](#projects-one-subfolder-per-generated-project)
@@ -86,6 +87,7 @@ template with every variable documented inline.
 | `HARNESS_INTERACTIVE` | `no` | Allow the agent to pause and ask instead of always pushing forward autonomously. Only meaningful with the CLI's `--interactive` flag — see [Interactive mode](#interactive-mode). |
 | `HARNESS_MODEL_SELECTION` | `manual` | `manual` \| `auto` — pick the best-fit model per task from a hand-curated catalog instead of always using `LLM_MODEL`. See [Automatic model selection](#automatic-model-selection). |
 | `HARNESS_MODELS_FILE` | `./models.yaml` | Path to the model catalog, only read when `HARNESS_MODEL_SELECTION=auto`. |
+| `HARNESS_ARTIFACTS_DIR` | *(empty — disabled)* | Per-run metadata/transcript/token-cost directory. See [Run artifacts](#run-artifacts). |
 | `HARNESS_TASK_STORE` | `memory` | `memory` \| `redis` \| `sqlite` \| `mysql` \| `postgres` — server-mode task registry backend, consulted only by `harness-server`/`harness-admin`. See [Task registry persistence](#task-registry-persistence). |
 | `HARNESS_TASK_TTL_SECONDS` | `0` | Seconds a completed/failed task record is kept before it's eligible for purge; `0` means keep forever. |
 | `HARNESS_TASK_STORE_SQLITE_PATH` | `./harness_tasks.db` | sqlite backend only. |
@@ -343,6 +345,52 @@ but not yet on `RemoteConversation`'s Python client (the remote agent-server
 already has the matching endpoint — the gap is only in the SDK's client
 library). Under docker, a candidate that fails just fails — the task ends
 normally, it doesn't fall back to the next model.
+
+## Run artifacts
+
+`HARNESS_ARTIFACTS_DIR` (blank by default — disabled) writes a durable,
+git-ignorable record of how each task run actually went: metadata, the
+full message transcript, and real token/cost metrics. It's a separate,
+sibling top-level directory — mirroring `HARNESS_PROJECTS_DIR`'s own
+shape — not a folder nested inside any one project, so harness telemetry
+never ends up inside a project's own (possibly-committed) directory tree.
+
+```bash
+HARNESS_ARTIFACTS_DIR=./artifacts uv run harness "..." --project my-api
+```
+
+Layout: `<HARNESS_ARTIFACTS_DIR>/<project-or-_unscoped>/<run-id>/`, one
+subfolder per task invocation (a project run many times over its life gets
+one subfolder per run, never overwritten). `_unscoped` is used when no
+`--project`/`project` was given. `run-id` is minted automatically — the
+CLI generates one per invocation; `harness-server` uses the exact same ID
+`GET /tasks/{id}` already returns, so a task's artifacts folder is always
+easy to find from its API response.
+
+Each run folder has three files:
+
+- **`metadata.json`** — `run_id`, `project`, `task`, `execution`, `model`
+  (the model that actually did the work — the *final* one, if auto
+  selection escalated), `model_selection`, `started_at`/`ended_at`,
+  `verification_state`, `completion_contract`, `acceptance_results`, and
+  `error` (set if the run raised — written even then, via a `finally`
+  block, since a failed run's diagnostics matter at least as much as a
+  successful one's).
+- **`transcript.json`** — every message produced during the run, same
+  shape server mode's `GET /tasks/{id}` already returns.
+- **`metrics.json`** — `{"combined": ..., "per_model": ...}`: real token
+  counts and cost from the SDK's own `conversation.conversation_stats`
+  (`accumulated_cost`, prompt/completion/cache/reasoning token counts).
+  `per_model` breaks this down by which model actually ran each part of
+  the task — meaningful when [Automatic model
+  selection](#automatic-model-selection) used more than one candidate,
+  a single `"harness"` entry otherwise.
+
+**`MODEL_DECISIONS.md` is unaffected by this** — it still lives inside the
+project workspace, unchanged; this directory is for genuinely new data
+(transcripts, tokens, cost), not a relocation. Works identically under
+`local` and `docker` execution — no limitation, unlike automatic model
+selection's mid-task fallback.
 
 ## Server mode (HTTP/WebSocket)
 

@@ -217,7 +217,12 @@ def create_app():
 
         try:
             outcome = stream_task(
-                record.task, cfg=cfg, on_message=on_message, acceptance_checks=acceptance_checks
+                record.task,
+                cfg=cfg,
+                on_message=on_message,
+                acceptance_checks=acceptance_checks,
+                run_id=record.id,
+                project=record.project,
             )
             record.verification_state = outcome.verification_state
             record.completion_contract = asdict(outcome.completion_contract)

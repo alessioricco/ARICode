@@ -544,3 +544,21 @@ def test_invalid_model_selection_raises():
 def test_models_file_defaults_and_override():
     cfg = load_config(_base_env(HARNESS_MODELS_FILE="./custom-models.yaml"))
     assert cfg.models_file == "./custom-models.yaml"
+
+
+# --- Per-run artifacts directory (HARNESS_ARTIFACTS_DIR) --------------------
+
+
+def test_artifacts_dir_defaults_to_blank():
+    cfg = load_config(_base_env())
+    assert cfg.artifacts_dir == ""
+
+
+def test_artifacts_dir_override():
+    cfg = load_config(_base_env(HARNESS_ARTIFACTS_DIR="./artifacts"))
+    assert cfg.artifacts_dir == "./artifacts"
+
+
+def test_artifacts_dir_blank_value_stays_blank():
+    cfg = load_config(_base_env(HARNESS_ARTIFACTS_DIR="   "))
+    assert cfg.artifacts_dir == ""

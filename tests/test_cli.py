@@ -114,6 +114,8 @@ def test_main_reads_task_from_file(monkeypatch, tmp_path, capsys):
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         calls["task"] = task
         return _fake_result([_FakeMessage("done")])
@@ -165,6 +167,8 @@ def test_docker_execution_is_passed_through_to_run_task(monkeypatch):
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         calls["cfg"] = cfg
         return _fake_result()
@@ -186,6 +190,8 @@ def test_run_task_error_is_reported_and_exits_nonzero(monkeypatch, capsys):
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         raise RuntimeError("HARNESS_EXECUTION=docker requires the 'sandbox' extra")
 
@@ -208,8 +214,11 @@ def test_project_flag_creates_subfolder_and_overrides_workspace(monkeypatch, tmp
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         calls["cfg"] = cfg
+        calls["project"] = project
         return _fake_result()
 
     monkeypatch.setattr(cli, "load_config", lambda: _cfg(projects_dir=str(tmp_path)))
@@ -220,6 +229,7 @@ def test_project_flag_creates_subfolder_and_overrides_workspace(monkeypatch, tmp
     expected = str(tmp_path / "myapp")
     assert exit_code == 0
     assert calls["cfg"].workspace == expected
+    assert calls["project"] == "myapp"
     assert (tmp_path / "myapp").is_dir()
 
 
@@ -247,6 +257,8 @@ def test_local_execution_runs_task_and_prints_final_message(monkeypatch, capsys)
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         calls["task"] = task
         calls["cfg"] = cfg
@@ -284,6 +296,8 @@ def test_agents_md_with_project_writes_file(monkeypatch, tmp_path):
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         return _fake_result()
 
@@ -308,6 +322,8 @@ def test_model_flag_overrides_llm_model_without_touching_env(monkeypatch):
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         calls["cfg"] = cfg
         return _fake_result()
@@ -333,6 +349,8 @@ def test_api_key_and_base_url_flags_override_config(monkeypatch):
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         calls["cfg"] = cfg
         return _fake_result()
@@ -365,6 +383,8 @@ def test_no_llm_override_flags_leaves_config_untouched(monkeypatch):
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         calls["cfg"] = cfg
         return _fake_result()
@@ -389,6 +409,8 @@ def test_reasoning_effort_flag_overrides_config(monkeypatch):
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         calls["cfg"] = cfg
         return _fake_result()
@@ -425,6 +447,8 @@ def test_prints_verification_state_and_exits_zero_when_verified(monkeypatch, cap
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         return _fake_result([_FakeMessage("all done")], verification_state="verified")
 
@@ -445,6 +469,8 @@ def test_exits_nonzero_when_verification_retries_are_exhausted(monkeypatch, caps
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         return _fake_result(
             [_FakeMessage("I gave up")],
@@ -471,6 +497,8 @@ def test_exits_nonzero_when_verification_keeps_timing_out(monkeypatch, capsys):
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         return _fake_result(
             [_FakeMessage("still going")],
@@ -496,6 +524,8 @@ def test_exits_nonzero_when_a_fix_attempt_made_no_progress(monkeypatch, capsys):
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         return _fake_result([_FakeMessage("tried a fix")], verification_state="no_progress")
 
@@ -517,6 +547,8 @@ def test_exits_nonzero_when_task_tracker_left_incomplete(monkeypatch, capsys):
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         return _fake_result(
             [_FakeMessage("finished")],
@@ -542,6 +574,8 @@ def test_exits_nonzero_when_agent_got_stuck(monkeypatch, capsys):
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         return _fake_result([], verification_state="stuck")
 
@@ -562,6 +596,8 @@ def test_exits_nonzero_when_task_budget_is_exhausted(monkeypatch, capsys):
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         return _fake_result(
             [_FakeMessage("ran out of time")],
@@ -596,6 +632,8 @@ def test_inconclusive_verification_still_exits_zero_but_is_visible(monkeypatch, 
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         return _fake_result(
             [_FakeMessage("done, probably")],
@@ -627,6 +665,8 @@ def test_require_verification_flag_defaults_to_off(monkeypatch):
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         calls["called"] = True
         return _fake_result(verification_state="inconclusive")
@@ -648,6 +688,8 @@ def test_require_verification_flag_makes_unknown_project_type_a_failure(monkeypa
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         return _fake_result(
             verification_state="inconclusive",
@@ -671,6 +713,8 @@ def test_require_verification_flag_makes_a_missing_tool_a_failure(monkeypatch):
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         return _fake_result(
             verification_state="inconclusive",
@@ -697,6 +741,8 @@ def test_require_verification_flag_makes_no_tests_collected_a_failure(monkeypatc
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         return _fake_result(verification_state="inconclusive", limitations=[])
 
@@ -716,6 +762,8 @@ def test_require_verification_flag_does_not_affect_a_real_verified_pass(monkeypa
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         return _fake_result(verification_state="verified")
 
@@ -735,6 +783,8 @@ def test_require_verification_flag_does_not_change_other_failure_states(monkeypa
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         return _fake_result(verification_state="retry_exhausted")
 
@@ -756,6 +806,8 @@ def test_execution_flag_overrides_configured_docker_default(monkeypatch):
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         calls["cfg"] = cfg
         return _fake_result()
@@ -780,6 +832,8 @@ def test_exits_nonzero_when_confirmation_required_with_no_handler(monkeypatch, c
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         return _fake_result(
             [_FakeMessage("stopped")],
@@ -807,6 +861,8 @@ def test_confirm_mode_never_passes_no_confirm_handler_to_run_task(monkeypatch):
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         calls["on_confirm"] = on_confirm
         return _fake_result()
@@ -829,6 +885,8 @@ def test_confirm_mode_always_passes_the_interactive_handler_to_run_task(monkeypa
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         calls["on_confirm"] = on_confirm
         return _fake_result()
@@ -870,6 +928,8 @@ def test_interactive_flag_off_by_default_passes_no_callback(monkeypatch):
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         calls["cfg"] = cfg
         calls["on_awaiting_input"] = on_awaiting_input
@@ -894,6 +954,8 @@ def test_interactive_flag_sets_config_and_passes_the_terminal_handler(monkeypatc
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         calls["cfg"] = cfg
         calls["on_awaiting_input"] = on_awaiting_input
@@ -945,6 +1007,8 @@ def test_auto_model_flag_off_by_default(monkeypatch):
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         calls["cfg"] = cfg
         calls["on_model_choice"] = on_model_choice
@@ -969,6 +1033,8 @@ def test_auto_model_flag_sets_config(monkeypatch):
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         calls["cfg"] = cfg
         return _fake_result()
@@ -991,6 +1057,8 @@ def test_auto_model_only_passes_the_prompt_when_also_interactive(monkeypatch):
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         calls["on_model_choice"] = on_model_choice
         return _fake_result()
@@ -1113,6 +1181,8 @@ def test_main_passes_parsed_acceptance_checks_to_run_task(monkeypatch):
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         calls["acceptance_checks"] = acceptance_checks
         return _fake_result()
@@ -1142,6 +1212,8 @@ def test_main_without_acceptance_checks_flag_passes_none(monkeypatch):
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         calls["acceptance_checks"] = acceptance_checks
         return _fake_result()
@@ -1162,6 +1234,8 @@ def test_exits_nonzero_when_acceptance_check_failed(monkeypatch, capsys):
         acceptance_checks=None,
         on_awaiting_input=None,
         on_model_choice=None,
+        run_id=None,
+        project=None,
     ):
         return _fake_result(
             [_FakeMessage("done, I think")],

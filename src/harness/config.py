@@ -166,6 +166,13 @@ class Config:
     model_selection: str = DEFAULT_MODEL_SELECTION  # one of MODEL_SELECTION_MODES
     models_file: str = DEFAULT_MODELS_FILE
 
+    # Opt-in per-run artifacts directory (see artifacts.py): metadata, the
+    # full message transcript, and token/cost metrics for each task run,
+    # one subfolder per project per run. Blank (the default) means the
+    # feature is off entirely — same "blank means off" convention as
+    # LLM_BASE_URL/HARNESS_DOCKER_PLATFORM, no separate on/off flag needed.
+    artifacts_dir: str = ""
+
 
 def _clean(value: str | None) -> str | None:
     """Trim whitespace; treat empty string as absent."""
@@ -381,6 +388,7 @@ def load_config(env: Mapping[str, str] | None = None, *, dotenv_path: str = ".en
         name="HARNESS_MODEL_SELECTION",
     )
     models_file = _clean(env.get("HARNESS_MODELS_FILE")) or DEFAULT_MODELS_FILE
+    artifacts_dir = _clean(env.get("HARNESS_ARTIFACTS_DIR")) or ""
 
     return Config(
         model=model,
@@ -419,6 +427,7 @@ def load_config(env: Mapping[str, str] | None = None, *, dotenv_path: str = ".en
         interactive=interactive,
         model_selection=model_selection,
         models_file=models_file,
+        artifacts_dir=artifacts_dir,
     )
 
 

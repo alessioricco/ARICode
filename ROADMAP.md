@@ -206,7 +206,21 @@ build plan. This file is the living, evolving companion to that static plan.
   around the whole task (not just on a normal return), so
   `MODEL_DECISIONS.md` still captures the full escalation history even
   when every candidate ultimately fails and the task raises — caught live,
-  not found by inspection (see decisions log).
+  not found by inspection (see decisions log). Also wires
+  `HARNESS_ARTIFACTS_DIR` (see `artifacts.py`): mints a `run_id` (or uses
+  the caller-supplied one — `server.py` passes its own `TaskRecord.id`) and
+  `started_at` when the feature is on, accumulates every message produced
+  across the whole task (not just the interactive checkpoint's buffer,
+  which gets cleared) into a full transcript, and — in the same `finally`
+  block already writing `MODEL_DECISIONS.md` — extracts
+  `conversation.conversation_stats.get_combined_metrics()` and
+  `.usage_to_metrics` (a free per-model breakdown, since auto model
+  selection already keys each candidate's `usage_id` distinctly) and calls
+  `write_run_artifacts()`. A new `project: str | None` parameter on
+  `stream_task`/`run_task` carries the project *name* through — `Config`
+  itself has no such field (only the already-resolved `workspace` path),
+  so `cli.py`/`server.py` (which both already have the name before
+  resolving it) pass it again here.
 - `custom_tools/run_tests_tool.py` — a language-neutral verification
   pipeline in four explicit, independently-tested stages: **project
   detection** (`detect_project()`, one marker-file walk covering Python/
@@ -297,6 +311,21 @@ build plan. This file is the living, evolving companion to that static plan.
   decisions log); `write_model_decisions()` (re)writes `MODEL_DECISIONS.md`
   in the project workspace from the full decisions list every time it's
   called, never appending, so it can't duplicate its own header.
+- `artifacts.py` — pure file-writing for `HARNESS_ARTIFACTS_DIR` (blank =
+  disabled): `resolve_run_artifacts_dir(artifacts_dir, project, run_id)`
+  builds `<artifacts_dir>/<project-or-"_unscoped">/<run_id>`, guarded by
+  the same path-containment check `config.resolve_project_dir()` already
+  applies to `HARNESS_PROJECTS_DIR` (a separate implementation, not a
+  shared call, since the error text needs to name the right env var —
+  same "different root, different error context" call already made for
+  `acceptance.py`'s containment check); `write_run_artifacts()` writes
+  `metadata.json`/`transcript.json`/`metrics.json` into it. No SDK
+  dependency — `runner.py` extracts everything (messages, metrics,
+  outcome) into plain data first. A separate, sibling top-level directory
+  (mirroring `HARNESS_PROJECTS_DIR`'s own shape), not nested inside any
+  one project — keeps harness telemetry out of a project's own
+  (possibly-committed) tree. `MODEL_DECISIONS.md` is unaffected — it stays
+  exactly where it already was; this is for genuinely new data only.
 - `workspace.py` — single dispatch point for execution backends
   (`build_workspace(cfg)`); `local` returns a plain path, `docker` returns a
   `DockerWorkspace`, both as context managers so cleanup is automatic.
@@ -2187,3 +2216,70 @@ build plan. This file is the living, evolving companion to that static plan.
     (OpenAI) → fails → chain exhausted, real `AuthenticationError`
     re-raised — matched exactly what `MODEL_DECISIONS.md` and the terminal
     output recorded, model-by-model, reason-by-reason.
+- **Per-run artifacts directory (`HARNESS_ARTIFACTS_DIR`): a separate,
+  sibling top-level directory, not a folder nested inside each project —
+  designed collaboratively, same process as auto model selection.** User
+  asked for a per-project place to inspect docs/analytics/metadata about
+  how a build went, floating "external... must be in `.env`" as the shape
+  — confirmed directly (not assumed) this reads as "mirror
+  `HARNESS_PROJECTS_DIR`'s own shape," not a hidden folder inside each
+  generated project, since the latter would mean writing a `.gitignore`
+  entry into a project the harness doesn't own.
+  - **`conversation.conversation_stats` discovery — the key fact that made
+    this cheap to build.** Read `openhands.sdk.llm.utils.metrics.Metrics`
+    and `ConversationStats` source directly before proposing anything:
+    `get_combined_metrics().get()` returns a real dict (`accumulated_cost`,
+    full token breakdown, per-call cost/latency/token-usage lists), and
+    `usage_to_metrics` is `dict[usage_id, Metrics]` — since auto model
+    selection already gives each catalog candidate its own `usage_id`, a
+    **per-model cost/token breakdown falls out for free**, zero new
+    plumbing beyond calling `.get()` on each entry. Also confirmed
+    `conversation_stats` exists on both `LocalConversation` and
+    `RemoteConversation` — unlike model selection's `switch_llm`, this
+    feature has no docker limitation at all.
+  - **`MODEL_DECISIONS.md` explicitly does not move** (user's explicit
+    choice) — this directory is for genuinely new data (transcripts,
+    tokens, cost), not a relocation of something that already works.
+  - **A run ID is minted, not left to the caller** (user's explicit
+    choice — "it's better having an automatically generated id"). `cli.py`
+    has no natural task identity today, so `stream_task` mints one
+    (`uuid.uuid4()`) whenever `cfg.artifacts_dir` is set and none was
+    given. `server.py` passes its own `TaskRecord.id` instead, so a task's
+    artifacts folder always matches what `GET /tasks/{id}` returns — the
+    one case where reusing an existing ID beats minting a fresh,
+    disconnected one.
+  - **A new `project: str | None` parameter on `stream_task`/`run_task`
+    was required, not just plumbing that already existed.** `Config` was
+    found, on inspection, to have no field for the project *name* at
+    all — only `workspace`, the already-resolved path `resolve_project_dir`
+    produces. `cli.py`/`server.py` both already hold the name before
+    resolving it, so they pass it again here, purely to bucket the
+    artifacts folder the same way `HARNESS_PROJECTS_DIR` is bucketed.
+  - **Path containment is a separate implementation from
+    `config.resolve_project_dir()`, not a shared call** — same exact
+    reasoning as `acceptance.py`'s own containment check and model
+    selection's `config_for_entry` (see their entries above): the
+    existing function's error text hardcodes "HARNESS_PROJECTS_DIR",
+    which would be actively wrong for a different root.
+  - **A live-caught bug, not just a plan followed as written:** the first
+    implementation only mounted the `write_run_artifacts()` call inside
+    the same success path as `write_model_decisions()`, not inside a
+    `finally` guarding the whole task — meaning a task whose model-
+    selection chain was fully exhausted (an already-tested failure mode)
+    would raise *before* any artifacts were written at all, silently
+    losing the transcript and metrics for exactly the run most worth
+    debugging. Fixed by capturing the exception via `except BaseException
+    as exc: captured_error = exc; raise` and moving the
+    `write_run_artifacts()` call into the existing `finally` block
+    alongside `write_model_decisions()` — the second time in this file a
+    "write artifacts even on failure" bug was caught only by testing the
+    already-known-risky path (an exhausted fallback chain), not by
+    inspection.
+  - Verified live end-to-end against a real LLM call: real token counts
+    (19,053 prompt / 272 completion tokens), a real cost
+    (`$0.00293586`), and a real 6-message transcript, all correctly
+    written to `metadata.json`/`metrics.json`/`transcript.json`; a
+    `--project` run correctly bucketed under
+    `<artifacts_dir>/<project>/<run_id>/`; and the default
+    (`HARNESS_ARTIFACTS_DIR` unset) confirmed to write nothing at all —
+    no `artifacts` directory created anywhere.

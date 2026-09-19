@@ -220,6 +220,7 @@ __marimo__/
 # harness
 private/
 /projects/
+/artifacts/
 
 # Secrets
 .env

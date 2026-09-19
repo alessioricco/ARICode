@@ -10,6 +10,7 @@ provider-agnostic: this test never hardcodes a model).
 
 from __future__ import annotations
 
+import json
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import ClassVar
@@ -1657,6 +1658,22 @@ def test_stream_task_acceptance_check_failure_downgrades_a_real_verified_run(mon
 # --- HARNESS_MODEL_SELECTION=auto -------------------------------------------
 
 
+class _FakeMetrics:
+    def __init__(self, cost: float = 0.01) -> None:
+        self._cost = cost
+
+    def get(self) -> dict:
+        return {"accumulated_cost": self._cost}
+
+
+class _FakeConversationStats:
+    def __init__(self) -> None:
+        self.usage_to_metrics = {"harness": _FakeMetrics()}
+
+    def get_combined_metrics(self) -> _FakeMetrics:
+        return _FakeMetrics(sum(m._cost for m in self.usage_to_metrics.values()))
+
+
 class _SwitchableConversation:
     """Fake Conversation for model-selection tests: tracks switch_llm calls
     and can be told to raise on a given .run() call (simulating a
@@ -1680,6 +1697,7 @@ class _SwitchableConversation:
         self.run_calls = 0
         self.sent_messages: list[str] = []
         self.switched_llms: list = []
+        self.conversation_stats = _FakeConversationStats()
 
     def send_message(self, message: str) -> None:
         self.sent_messages.append(message)
@@ -1984,3 +2002,113 @@ def test_quality_failure_escalates_during_verify_retry(monkeypatch, tmp_path):
     kinds = [d.kind for d in outcome.model_decisions]
     assert kinds == ["initial", "escalation_quality_failure"]
     assert outcome.verification_state == "verified"
+
+
+# --- HARNESS_ARTIFACTS_DIR ---------------------------------------------
+
+
+def test_artifacts_dir_unset_writes_nothing(monkeypatch, tmp_path):
+    conversation = _SwitchableConversation([])
+    _stub_stream_task_dependencies(monkeypatch, conversation, tmp_path)
+
+    runner.stream_task("do the thing", cfg=_cfg(workspace=str(tmp_path)))
+
+    assert not (tmp_path / "artifacts").exists()
+
+
+def test_artifacts_dir_set_writes_metadata_transcript_and_metrics(monkeypatch, tmp_path):
+    conversation = _SwitchableConversation([])
+    _stub_stream_task_dependencies(monkeypatch, conversation, tmp_path)
+    artifacts_dir = tmp_path / "artifacts"
+
+    outcome = runner.stream_task(
+        "do the thing",
+        cfg=_cfg(workspace=str(tmp_path), artifacts_dir=str(artifacts_dir)),
+        project="my-project",
+    )
+
+    run_dirs = list((artifacts_dir / "my-project").iterdir())
+    assert len(run_dirs) == 1
+    run_dir = run_dirs[0]
+    metadata = json.loads((run_dir / "metadata.json").read_text())
+    assert metadata["project"] == "my-project"
+    assert metadata["task"] == "do the thing"
+    assert metadata["verification_state"] == outcome.verification_state
+    assert metadata["error"] is None
+    assert (run_dir / "transcript.json").exists()
+    metrics = json.loads((run_dir / "metrics.json").read_text())
+    assert metrics["combined"]["accumulated_cost"] == 0.01
+    assert "harness" in metrics["per_model"]
+
+
+def test_artifacts_dir_uses_unscoped_bucket_with_no_project(monkeypatch, tmp_path):
+    conversation = _SwitchableConversation([])
+    _stub_stream_task_dependencies(monkeypatch, conversation, tmp_path)
+    artifacts_dir = tmp_path / "artifacts"
+
+    runner.stream_task(
+        "do the thing", cfg=_cfg(workspace=str(tmp_path), artifacts_dir=str(artifacts_dir))
+    )
+
+    assert (artifacts_dir / "_unscoped").is_dir()
+
+
+def test_artifacts_dir_uses_the_given_run_id_verbatim(monkeypatch, tmp_path):
+    conversation = _SwitchableConversation([])
+    _stub_stream_task_dependencies(monkeypatch, conversation, tmp_path)
+    artifacts_dir = tmp_path / "artifacts"
+
+    runner.stream_task(
+        "do the thing",
+        cfg=_cfg(workspace=str(tmp_path), artifacts_dir=str(artifacts_dir)),
+        run_id="my-explicit-run-id",
+    )
+
+    assert (artifacts_dir / "_unscoped" / "my-explicit-run-id" / "metadata.json").exists()
+
+
+def test_artifacts_are_written_even_when_the_task_raises(monkeypatch, tmp_path):
+    conversation = _SwitchableConversation([_run_error("boom")])
+    _stub_stream_task_dependencies(monkeypatch, conversation, tmp_path)
+    artifacts_dir = tmp_path / "artifacts"
+
+    with pytest.raises(Exception, match="boom"):
+        runner.stream_task(
+            "do the thing",
+            cfg=_cfg(
+                workspace=str(tmp_path),
+                artifacts_dir=str(artifacts_dir),
+                # No auto-selection here — a plain, unhandled failure.
+            ),
+        )
+
+    run_dirs = list((artifacts_dir / "_unscoped").iterdir())
+    assert len(run_dirs) == 1
+    metadata = json.loads((run_dirs[0] / "metadata.json").read_text())
+    assert metadata["verification_state"] is None
+    assert "boom" in metadata["error"]
+
+
+def test_artifacts_metrics_include_per_model_breakdown_after_a_switch(monkeypatch, tmp_path):
+    conversation = _SwitchableConversation([])
+    conversation.conversation_stats.usage_to_metrics = {
+        "harness:cheap": _FakeMetrics(0.01),
+        "harness:balanced": _FakeMetrics(0.02),
+    }
+    _stub_stream_task_dependencies(monkeypatch, conversation, tmp_path)
+    artifacts_dir = tmp_path / "artifacts"
+
+    runner.stream_task(
+        "do the thing",
+        cfg=_cfg(
+            workspace=str(tmp_path),
+            artifacts_dir=str(artifacts_dir),
+            model_selection="auto",
+            models_file=_write_catalog(tmp_path),
+        ),
+    )
+
+    run_dirs = list((artifacts_dir / "_unscoped").iterdir())
+    metrics = json.loads((run_dirs[0] / "metrics.json").read_text())
+    assert metrics["combined"]["accumulated_cost"] == 0.03
+    assert set(metrics["per_model"]) == {"harness:cheap", "harness:balanced"}
