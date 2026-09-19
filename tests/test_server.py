@@ -290,6 +290,151 @@ def test_get_task_status_completed_does_not_imply_verification_passed(monkeypatc
     assert final["completion_contract"]["limitations"] == ["pytest: 2 failed"]
 
 
+# --- require_verification: opt-in strict treatment of "inconclusive" ------
+
+
+def test_create_task_inconclusive_defaults_to_completed_status(monkeypatch):
+    def _fake_stream_task(task, cfg=None, on_message=None):
+        return _fake_outcome(
+            verification_state="inconclusive",
+            limitations=["No automated check could be run for this project."],
+        )
+
+    monkeypatch.setattr(server, "load_config", lambda: _cfg())
+    monkeypatch.setattr(server, "stream_task", _fake_stream_task)
+
+    client = TestClient(server.create_app())
+    task_id = client.post("/tasks", json={"task": "do something"}).json()["task_id"]
+
+    final = _wait_for_status(client, task_id)
+
+    assert final["status"] == "completed"
+    assert final["verification_state"] == "inconclusive"
+
+
+def test_create_task_require_verification_turns_unknown_project_into_failure(monkeypatch):
+    def _fake_stream_task(task, cfg=None, on_message=None):
+        return _fake_outcome(
+            verification_state="inconclusive",
+            limitations=["No automated check could be run for this project."],
+        )
+
+    monkeypatch.setattr(server, "load_config", lambda: _cfg())
+    monkeypatch.setattr(server, "stream_task", _fake_stream_task)
+
+    client = TestClient(server.create_app())
+    task_id = client.post(
+        "/tasks", json={"task": "do something", "require_verification": True}
+    ).json()["task_id"]
+
+    final = _wait_for_status(client, task_id)
+
+    assert final["status"] == "failed"
+    assert final["verification_state"] == "inconclusive"
+    assert "No automated check could be run" in final["error"]
+
+
+def test_create_task_require_verification_turns_a_missing_tool_into_failure(monkeypatch):
+    def _fake_stream_task(task, cfg=None, on_message=None):
+        return _fake_outcome(
+            verification_state="inconclusive",
+            limitations=["npm is required to verify this project but was not found on PATH."],
+        )
+
+    monkeypatch.setattr(server, "load_config", lambda: _cfg())
+    monkeypatch.setattr(server, "stream_task", _fake_stream_task)
+
+    client = TestClient(server.create_app())
+    task_id = client.post(
+        "/tasks", json={"task": "do something", "require_verification": True}
+    ).json()["task_id"]
+
+    final = _wait_for_status(client, task_id)
+
+    assert final["status"] == "failed"
+
+
+def test_create_task_require_verification_turns_no_tests_collected_into_failure(monkeypatch):
+    # The quiet "pytest collected zero tests" case is still just
+    # "inconclusive" from the caller's point of view — require_verification
+    # doesn't special-case it.
+    def _fake_stream_task(task, cfg=None, on_message=None):
+        return _fake_outcome(verification_state="inconclusive", limitations=[])
+
+    monkeypatch.setattr(server, "load_config", lambda: _cfg())
+    monkeypatch.setattr(server, "stream_task", _fake_stream_task)
+
+    client = TestClient(server.create_app())
+    task_id = client.post(
+        "/tasks", json={"task": "do something", "require_verification": True}
+    ).json()["task_id"]
+
+    final = _wait_for_status(client, task_id)
+
+    assert final["status"] == "failed"
+
+
+def test_create_task_require_verification_does_not_affect_a_real_verified_pass(monkeypatch):
+    def _fake_stream_task(task, cfg=None, on_message=None):
+        return _fake_outcome(verification_state="verified")
+
+    monkeypatch.setattr(server, "load_config", lambda: _cfg())
+    monkeypatch.setattr(server, "stream_task", _fake_stream_task)
+
+    client = TestClient(server.create_app())
+    task_id = client.post(
+        "/tasks", json={"task": "do something", "require_verification": True}
+    ).json()["task_id"]
+
+    final = _wait_for_status(client, task_id)
+
+    assert final["status"] == "completed"
+
+
+def test_create_task_require_verification_does_not_change_other_verification_states(monkeypatch):
+    # require_verification only special-cases "inconclusive" — every other
+    # verification_state keeps its existing status semantics unchanged
+    # ("completed" means the run didn't raise, never "verification passed";
+    # see test_get_task_status_completed_does_not_imply_verification_passed).
+    def _fake_stream_task(task, cfg=None, on_message=None):
+        return _fake_outcome(verification_state="retry_exhausted", limitations=["pytest: 2 failed"])
+
+    monkeypatch.setattr(server, "load_config", lambda: _cfg())
+    monkeypatch.setattr(server, "stream_task", _fake_stream_task)
+
+    client = TestClient(server.create_app())
+    task_id = client.post(
+        "/tasks", json={"task": "do something", "require_verification": True}
+    ).json()["task_id"]
+
+    final = _wait_for_status(client, task_id)
+
+    assert final["status"] == "completed"
+    assert final["error"] is None  # unchanged: no require_verification message stapled on
+    assert final["verification_state"] == "retry_exhausted"
+
+
+def test_stream_task_require_verification_sends_error_event_for_inconclusive(monkeypatch):
+    def _fake_stream_task(task, cfg=None, on_message=None):
+        on_message(_FakeMessage("assistant", "done"))
+        return _fake_outcome(
+            verification_state="inconclusive",
+            limitations=["No automated check could be run for this project."],
+        )
+
+    monkeypatch.setattr(server, "load_config", lambda: _cfg())
+    monkeypatch.setattr(server, "stream_task", _fake_stream_task)
+
+    client = TestClient(server.create_app())
+    with client.websocket_connect("/tasks/stream") as ws:
+        ws.send_json({"task": "do something", "require_verification": True})
+        ws.receive_json()  # the "message" event
+        result = ws.receive_json()
+
+    assert result["type"] == "error"
+    assert "No automated check could be run" in result["detail"]
+
+
 def test_get_task_unknown_id_returns_404():
     client = TestClient(server.create_app())
 

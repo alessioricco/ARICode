@@ -84,19 +84,18 @@ still works). 9 new tests across `test_config.py`/`test_cli.py`/
 `test_server.py`. See `ROADMAP.md` decisions log and `MANUAL.md`
 "Projects: one subfolder per generated project".
 
-### 7. Reconsider treating `inconclusive` as a nonzero (unsuccessful) exit by default
-`cli.py` deliberately returns exit code `0` for `inconclusive` today — the
-code comment says so explicitly ("isn't an error — nothing was proven
-broken") — so this isn't a bug to fix so much as a design default worth
-reconsidering: a CI pipeline or calling script that only checks the exit
-code still can't distinguish "verified" from "nothing could be checked,"
-which is exactly the ambiguity `verification_state` was built to make
-visible in the first place. Consider making `inconclusive` nonzero by
-default (or adding an explicit `--allow-unverified` opt-in for callers that
-want today's behavior back), while keeping the state itself — and the
-`limitations` explaining why — visible in `TaskOutcome` and server
-responses either way. Add CLI and API tests for unknown projects, missing
-tools, and projects with no tests to lock in whichever default is chosen.
+### 7. ~~Reconsider treating `inconclusive` as a nonzero (unsuccessful) exit by default~~ — DONE
+Asked the user which of three shapes they wanted (flip the default,
+opt-in flag, leave as-is) since this genuinely changes CLI/API behavior
+for existing callers — chose **opt-in flag, default unchanged**. Added
+`--require-verification` (CLI) and `require_verification` (`POST /tasks`/
+`WS /tasks/stream`, default `false`): an `inconclusive` result becomes
+exit `1` / `status: "failed"` / a `"type": "error"` WS frame when set,
+unchanged otherwise. Every other `verification_state` is unaffected.
+Verified live via the real CLI (same task, same inconclusive result,
+`--require-verification` flipping exit 0 → 1). 13 new tests across
+`test_cli.py`/`test_server.py`. See `ROADMAP.md` decisions log and
+`MANUAL.md` "CLI reference"/"Server mode".
 
 ### 8. Add a global task execution budget
 `HARNESS_MAX_ITERATIONS` bounds each individual `conversation.run()` call,

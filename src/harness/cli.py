@@ -137,6 +137,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "write into otherwise)."
         ),
     )
+    parser.add_argument(
+        "--require-verification",
+        action="store_true",
+        help=(
+            "Treat an 'inconclusive' verification result (nothing runnable "
+            "confirmed the software works — e.g. an unknown project type, a "
+            "missing tool, or a project with no tests yet) as a failure: "
+            "nonzero exit, same as retry_exhausted/timed_out/stuck/etc. Off "
+            "by default — inconclusive exits 0, since nothing was proven "
+            "broken, only unproven."
+        ),
+    )
     return parser
 
 
@@ -209,7 +221,10 @@ def main(argv: list[str] | None = None) -> int:
     # left incomplete, needed a confirm-mode approval nobody could answer, or
     # whose run never reached a coherent finish, is a nonzero exit;
     # "inconclusive" (nothing runnable to check) is not an error but is still
-    # printed so it isn't mistaken for a confirmed pass.
+    # printed so it isn't mistaken for a confirmed pass — unless
+    # --require-verification opted into treating "nothing was checked" as a
+    # failure too (off by default: this is a real behavior change a caller
+    # must ask for, not a silent default flip — see ROADMAP.md).
     outcome = messages.outcome
     print(f"\nVerification: {outcome.verification_state}")
     for note in outcome.completion_contract.limitations:
@@ -222,6 +237,8 @@ def main(argv: list[str] | None = None) -> int:
         "confirmation_required",
         "stuck",
     ):
+        return 1
+    if args.require_verification and outcome.verification_state == "inconclusive":
         return 1
     return 0
 

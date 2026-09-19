@@ -463,6 +463,96 @@ def test_inconclusive_verification_still_exits_zero_but_is_visible(monkeypatch, 
     assert "No automated check could be run" in out
 
 
+# --- --require-verification: opt-in strict treatment of "inconclusive" -----
+
+
+def test_require_verification_flag_defaults_to_off(monkeypatch):
+    calls = {}
+
+    def _fake_run_task(task, cfg=None, on_confirm=None):
+        calls["called"] = True
+        return _fake_result(verification_state="inconclusive")
+
+    monkeypatch.setattr(cli, "load_config", lambda: _cfg())
+    monkeypatch.setattr(cli, "run_task", _fake_run_task)
+
+    exit_code = cli.main(["do something"])
+
+    assert calls["called"] is True
+    assert exit_code == 0
+
+
+def test_require_verification_flag_makes_unknown_project_type_a_failure(monkeypatch, capsys):
+    def _fake_run_task(task, cfg=None, on_confirm=None):
+        return _fake_result(
+            verification_state="inconclusive",
+            limitations=["No automated check could be run for this project."],
+        )
+
+    monkeypatch.setattr(cli, "load_config", lambda: _cfg())
+    monkeypatch.setattr(cli, "run_task", _fake_run_task)
+
+    exit_code = cli.main(["do something", "--require-verification"])
+
+    assert exit_code == 1
+    assert "Verification: inconclusive" in capsys.readouterr().out
+
+
+def test_require_verification_flag_makes_a_missing_tool_a_failure(monkeypatch):
+    def _fake_run_task(task, cfg=None, on_confirm=None):
+        return _fake_result(
+            verification_state="inconclusive",
+            limitations=["npm is required to verify this project but was not found on PATH."],
+        )
+
+    monkeypatch.setattr(cli, "load_config", lambda: _cfg())
+    monkeypatch.setattr(cli, "run_task", _fake_run_task)
+
+    exit_code = cli.main(["do something", "--require-verification"])
+
+    assert exit_code == 1
+
+
+def test_require_verification_flag_makes_no_tests_collected_a_failure(monkeypatch):
+    # Even the quiet, otherwise-non-blocking "pytest collected zero tests"
+    # case is still just "inconclusive" — --require-verification doesn't
+    # special-case it, since the whole point of opting in is "no evidence
+    # is not good enough," regardless of which specific reason produced it.
+    def _fake_run_task(task, cfg=None, on_confirm=None):
+        return _fake_result(verification_state="inconclusive", limitations=[])
+
+    monkeypatch.setattr(cli, "load_config", lambda: _cfg())
+    monkeypatch.setattr(cli, "run_task", _fake_run_task)
+
+    exit_code = cli.main(["do something", "--require-verification"])
+
+    assert exit_code == 1
+
+
+def test_require_verification_flag_does_not_affect_a_real_verified_pass(monkeypatch):
+    def _fake_run_task(task, cfg=None, on_confirm=None):
+        return _fake_result(verification_state="verified")
+
+    monkeypatch.setattr(cli, "load_config", lambda: _cfg())
+    monkeypatch.setattr(cli, "run_task", _fake_run_task)
+
+    exit_code = cli.main(["do something", "--require-verification"])
+
+    assert exit_code == 0
+
+
+def test_require_verification_flag_does_not_change_other_failure_states(monkeypatch):
+    def _fake_run_task(task, cfg=None, on_confirm=None):
+        return _fake_result(verification_state="retry_exhausted")
+
+    monkeypatch.setattr(cli, "load_config", lambda: _cfg())
+    monkeypatch.setattr(cli, "run_task", _fake_run_task)
+
+    exit_code = cli.main(["do something", "--require-verification"])
+
+    assert exit_code == 1
+
+
 def test_execution_flag_overrides_configured_docker_default(monkeypatch):
     calls = {}
 

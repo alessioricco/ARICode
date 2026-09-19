@@ -85,7 +85,7 @@ template with every variable documented inline.
 ```bash
 uv run python -m harness "<task>" [--execution {local,docker}] [--project NAME] \
     [--agents-md TEXT] [--model MODEL] [--api-key KEY] [--base-url URL] \
-    [--reasoning-effort LEVEL]
+    [--reasoning-effort LEVEL] [--require-verification]
 ```
 
 (Also installed as a console script: `harness "<task>" ...`, once the package
@@ -110,16 +110,28 @@ is installed via `uv pip install -e .`.)
   model at different reasoning-effort levels, to compare results. Any
   combination may be given; an omitted flag keeps `.env`'s value. See
   [Switching LLM provider / model](#switching-llm-provider--model).
+- `--require-verification` — off by default. Treats an `inconclusive`
+  verification result (nothing runnable confirmed the software works — an
+  unknown project type, a missing required tool, a project with no tests
+  yet, ...) as a failure too: nonzero exit, same as
+  `retry_exhausted`/`timed_out`/`stuck`/etc. Without this flag,
+  `inconclusive` exits `0` — the current default, kept for backward
+  compatibility, since "nothing was proven broken" isn't the same claim as
+  "something is broken." A CI pipeline or script that wants a hard
+  pass/fail signal on the exit code alone (rather than parsing the
+  `Verification:` line or `TaskOutcome.verification_state`) should pass
+  this flag.
 
 The agent's final message is printed to stdout, followed by a
 `Verification: <state>` line (and any limitation notes under it) — see
 [Test verification](#test-verification) for what each state means. Exit code
 is `1` on a configuration error, a run-time error (printed to stderr as
 `Configuration error: ...` / `Error: ...` — not a raw traceback), or a
-`retry_exhausted`/`no_progress`/`timed_out`/`incomplete`/`stuck` verification
-outcome; `0` for `verified` and `inconclusive` (the latter isn't an error —
-nothing was proven broken — but it's still printed so it isn't mistaken for
-a confirmed pass).
+`retry_exhausted`/`no_progress`/`timed_out`/`incomplete`/`confirmation_required`/`stuck`
+verification outcome; `0` for `verified` and `inconclusive` (the latter
+isn't an error by default — nothing was proven broken — but it's still
+printed so it isn't mistaken for a confirmed pass; pass
+`--require-verification` to make it nonzero too).
 
 Examples:
 
@@ -216,7 +228,9 @@ Request body: `task` (required), `project` (optional, same meaning as CLI
 in the same request), `model` / `api_key` / `base_url` / `reasoning_effort`
 (all optional, same meaning as CLI `--model` / `--api-key` / `--base-url` /
 `--reasoning-effort` — override `LLM_MODEL`/`LLM_API_KEY`/`LLM_BASE_URL`/
-`LLM_REASONING_EFFORT` for this request only, without touching `.env`).
+`LLM_REASONING_EFFORT` for this request only, without touching `.env`),
+`require_verification` (optional, boolean, default `false` — same meaning
+as CLI `--require-verification`; see below).
 Response (`202 Accepted`): `{"task_id": "...", "status":
 "..."}`. Config errors — including `agents_md` without `project` — are
 validated synchronously before a task is even created, so those still come
@@ -252,12 +266,24 @@ once `status == "completed"`; `error` is set once `status == "failed"`.
 **`status == "completed"` only ever means the run didn't raise an
 exception — it is not proof the work is correct.** Check
 `verification_state` for that: one of `"verified"`, `"inconclusive"`,
-`"retry_exhausted"`, `"no_progress"`, `"timed_out"`, `"incomplete"`, or
-`"stuck"` (see [Test verification](#test-verification) for what each means
-and when it's set), populated once `status` reaches
-`"completed"`. `completion_contract` is the structured record of what was
-actually checked: `{"goal", "acceptance_criteria", "verification_checks",
-"limitations"}` (same shape as `runner.py`'s `CompletionContract`).
+`"retry_exhausted"`, `"no_progress"`, `"timed_out"`, `"incomplete"`,
+`"confirmation_required"`, or `"stuck"` (see [Test
+verification](#test-verification) for what each means and when it's set),
+populated once `status` reaches `"completed"` (or `"failed"` — see
+`require_verification` below). `completion_contract` is the structured
+record of what was actually checked: `{"goal", "acceptance_criteria",
+"verification_checks", "limitations"}` (same shape as `runner.py`'s
+`CompletionContract`).
+
+**`require_verification: true`** makes an `"inconclusive"` result end with
+`status: "failed"` instead of `"completed"` (with `error` set to a message
+explaining why), so a caller that only checks the coarse `status` field —
+not `verification_state` — still gets an accurate pass/fail signal. Off by
+default: `"inconclusive"` keeps `status: "completed"`, matching CLI's
+default. Every other `verification_state` is unaffected either way — this
+only changes the specific "nothing could be checked" case. The `WS
+/tasks/stream` equivalent sends a `{"type": "error", ...}` event instead of
+`{"type": "result", ...}` in the same situation.
 
 **In-memory only:** the task registry lives in the server process's memory —
 restarting the server loses all task history, and it isn't shared across
@@ -268,9 +294,10 @@ accumulate them for now (see [Known limitations](#known-limitations)).
 
 ### `WS /tasks/stream` — live streaming, single connection
 
-Same inputs (including `model`/`api_key`/`base_url`/`reasoning_effort`), sent as the first WebSocket message, but pushes each message to
-the client as the agent produces it, over the connection that's already open
-— no polling needed:
+Same inputs (including `model`/`api_key`/`base_url`/`reasoning_effort`/
+`require_verification`), sent as the first WebSocket message, but pushes
+each message to the client as the agent produces it, over the connection
+that's already open — no polling needed:
 
 ```python
 import json
@@ -287,6 +314,10 @@ Each frame is `{"type": "message", ...Message.model_dump()}`,
 closes on a successful run — `{"type": "result", "verification_state": ...,
 "completion_contract": {...}}`, the same terminal outcome `GET
 /tasks/{task_id}` exposes (see [Test verification](#test-verification)).
+With `require_verification: true`, an `"inconclusive"` outcome sends
+`{"type": "error", "detail": "..."}` instead of a `"result"` frame — same
+`require_verification` semantics as `POST /tasks`, just expressed as which
+frame type arrives rather than which `status` value.
 The server closes the socket once the run finishes (normal close, code 1000)
 or after sending an error. The blocking
 `conversation.run()` call runs in a background thread per connection, bridged
@@ -955,16 +986,24 @@ uv run pytest -q
   no real network call), and `_confirm_pending_actions` (only an explicit
   `y`/`yes` approves; `builtins.input` monkeypatched, no real terminal) plus
   confirming `cli.main` only passes it to `run_task` when
-  `confirm_mode == "always"`, and a regression test confirming `--project
+  `confirm_mode == "always"`, a regression test confirming `--project
   ../escaped` is rejected with a configuration error rather than creating
-  a directory outside `HARNESS_PROJECTS_DIR`.
+  a directory outside `HARNESS_PROJECTS_DIR`, and `--require-verification`
+  (default off, an unknown project type/missing tool/no-tests-collected
+  case all become exit `1` when passed, other verification states and the
+  default-off case are unaffected).
 - `tests/test_server.py` — REST/WebSocket/OpenAI-compatible routes via
   FastAPI's `TestClient` (SSE streaming read via `client.stream(...)` +
   `iter_lines()`); `load_config`/`run_task`/`stream_task` are monkeypatched,
   no LLM. Includes a regression test for the `role == "assistant"` filtering
-  bug (see MANUAL.md "OpenAI-compatible adapter"), and one confirming
+  bug (see MANUAL.md "OpenAI-compatible adapter"), one confirming
   `POST /tasks`'s `project` field rejects an absolute path with a `400`
-  instead of resolving it. Skips cleanly
+  instead of resolving it, and `require_verification` coverage for both
+  `POST /tasks` (default `status: "completed"` for `inconclusive`, flips to
+  `"failed"` with an explanatory `error` when set, unknown project type/
+  missing tool/no-tests-collected all covered, other verification states
+  unaffected) and `WS /tasks/stream` (sends a `"type": "error"` frame
+  instead of `"result"` in the same situation). Skips cleanly
   (`pytest.importorskip("fastapi")`) when the `server` extra isn't installed.
 - `tests/test_runner.py` — one real end-to-end smoke test (**skips cleanly**
   when `LLM_MODEL`/`LLM_API_KEY` aren't configured; when they are, it makes

@@ -156,6 +156,11 @@ def create_app():
         api_key: str | None = None
         base_url: str | None = None
         reasoning_effort: str | None = None
+        # Off by default: "inconclusive" (nothing runnable confirmed the
+        # software works) is not treated as a failure unless the caller
+        # explicitly opts in — same rationale and same default as the CLI's
+        # --require-verification (see cli.py/ROADMAP.md).
+        require_verification: bool = False
 
     class ChatMessage(BaseModel):
         role: str
@@ -183,7 +188,7 @@ def create_app():
     tasks: dict[str, _TaskRecord] = {}
     tasks_lock = threading.Lock()
 
-    def run_in_background(record: _TaskRecord, cfg: Config) -> None:
+    def run_in_background(record: _TaskRecord, cfg: Config, require_verification: bool) -> None:
         with tasks_lock:
             record.status = "running"
             record.updated_at = time.time()
@@ -196,9 +201,17 @@ def create_app():
         try:
             outcome = stream_task(record.task, cfg=cfg, on_message=on_message)
             with tasks_lock:
-                record.status = "completed"
                 record.verification_state = outcome.verification_state
                 record.completion_contract = asdict(outcome.completion_contract)
+                if require_verification and outcome.verification_state == "inconclusive":
+                    record.status = "failed"
+                    record.error = (
+                        "Verification was inconclusive and require_verification=true "
+                        "requested treating that as a failure: "
+                        + "; ".join(outcome.completion_contract.limitations)
+                    )
+                else:
+                    record.status = "completed"
         except Exception as exc:  # noqa: BLE001 - surfaced via GET /tasks/{id}, not raised here
             with tasks_lock:
                 record.status = "failed"
@@ -232,7 +245,11 @@ def create_app():
         record = _TaskRecord(id=str(uuid.uuid4()), task=request.task)
         with tasks_lock:
             tasks[record.id] = record
-        threading.Thread(target=run_in_background, args=(record, cfg), daemon=True).start()
+        threading.Thread(
+            target=run_in_background,
+            args=(record, cfg, request.require_verification),
+            daemon=True,
+        ).start()
 
         return {"task_id": record.id, "status": record.status}
 
@@ -287,13 +304,21 @@ def create_app():
         def run() -> None:
             try:
                 outcome = stream_task(request.task, cfg=cfg, on_message=on_message)
-                events.put(
-                    {
-                        "type": "result",
-                        "verification_state": outcome.verification_state,
-                        "completion_contract": asdict(outcome.completion_contract),
-                    }
-                )
+                if request.require_verification and outcome.verification_state == "inconclusive":
+                    detail = (
+                        "Verification was inconclusive and require_verification=true "
+                        "requested treating that as a failure: "
+                        + "; ".join(outcome.completion_contract.limitations)
+                    )
+                    events.put({"type": "error", "detail": detail})
+                else:
+                    events.put(
+                        {
+                            "type": "result",
+                            "verification_state": outcome.verification_state,
+                            "completion_contract": asdict(outcome.completion_contract),
+                        }
+                    )
             except Exception as exc:  # noqa: BLE001 - surfaced to the client, not raised
                 events.put({"type": "error", "detail": str(exc)})
             finally:

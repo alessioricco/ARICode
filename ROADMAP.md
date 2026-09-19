@@ -143,10 +143,18 @@ build plan. This file is the living, evolving companion to that static plan.
   this generalization was scoped this way, and for what's genuinely
   verified vs. only detected per language.
 - `cli.py` — `python -m harness "<task>" [--execution] [--project] [--agents-md]
-  [--model] [--api-key] [--base-url] [--reasoning-effort]`. `task` is resolved via
-  `resolve_task_source()`: http(s) URL (fetched) or an existing local file
-  (read) take precedence over literal text. CLI-only — server mode's `task`
-  field does not do this resolution.
+  [--model] [--api-key] [--base-url] [--reasoning-effort]
+  [--require-verification]`. `task` is resolved via `resolve_task_source()`:
+  http(s) URL (fetched) or an existing local file (read) take precedence
+  over literal text. CLI-only — server mode's `task` field does not do this
+  resolution. `--require-verification` (off by default) makes an
+  `inconclusive` verification result exit nonzero too, matched on the
+  server side by `TaskRequest.require_verification` (`POST /tasks` flips
+  `status` from `"completed"` to `"failed"` for that one case; `WS
+  /tasks/stream` sends a `"type": "error"` frame instead of `"result"`) —
+  every other `verification_state` is unaffected either way. See MANUAL.md
+  "CLI reference" and "Server mode" and decisions log below for why this
+  is opt-in rather than a flipped default.
 - `workspace.py` — single dispatch point for execution backends
   (`build_workspace(cfg)`); `local` returns a plain path, `docker` returns a
   `DockerWorkspace`, both as context managers so cleanup is automatic.
@@ -162,6 +170,11 @@ build plan. This file is the living, evolving companion to that static plan.
   `/v1/chat/completions` accepts the same thing under `llm_model`/
   `llm_api_key`/`llm_base_url`/`llm_reasoning_effort` — kept distinct from
   its wire-mandated `model` field, which stays echo-only (see decisions log).
+  `POST /tasks` / `WS /tasks/stream` also accept an optional
+  `require_verification` field (default `false`), the server-side
+  counterpart to `cli.py`'s `--require-verification` — deliberately not
+  added to `/v1/chat/completions`, which doesn't surface `verification_state`
+  at all (see the matching backlog entry).
 - `skills.py` — two mechanisms, don't conflate them: `load_skill_catalog()`
   loads the shared, reusable, trigger-based catalog (`skills/`, arbitrary
   subfolders for classification) into every agent's `AgentContext`
@@ -524,6 +537,56 @@ build plan. This file is the living, evolving companion to that static plan.
 
 ## Decisions log (why, not just what)
 
+- **`--require-verification`/`require_verification`: opt-in flag with the
+  default kept exactly as-is, not a flipped default with an opt-out.**
+  This item was raised as a genuine open question — the CLI's own code
+  comment already said "isn't an error — nothing was proven broken" as a
+  deliberate justification for exiting `0` on `inconclusive`, so this
+  wasn't a bug to silently fix. Presented the user three shapes (flip the
+  default with an opt-out flag for today's behavior, matching the item's
+  own proposed phrasing; keep the default and add an opt-in flag; leave it
+  alone entirely) rather than picking one, specifically because flipping a
+  CLI exit code's default is a real backward-compatibility break for any
+  existing script or CI pipeline that already depends on `inconclusive`
+  exiting `0` — not a decision to make unilaterally on the user's behalf.
+  Chosen: keep the default (`inconclusive` still exits `0`), add
+  `--require-verification` as a new, purely additive flag. Zero risk to
+  any existing caller; a caller that wants a stricter guarantee opts in
+  explicitly.
+  - **Threaded through both CLI and the native REST/WS server API, not
+    CLI-only.** The item's own phrasing ("keeping the state itself... and
+    server responses") called for parity, and the underlying ambiguity
+    (`status`/exit-code alone can't distinguish "verified" from "nothing
+    could be checked") is identical in both surfaces — a server caller
+    that only checks `status` has exactly the same blind spot a CLI script
+    checking only the exit code does.
+  - **Deliberately not added to `/v1/chat/completions`.** That adapter
+    already doesn't surface `verification_state` at all (a standing,
+    documented gap — see the matching backlog entry) — adding a flag whose
+    entire purpose is "change what happens for one specific
+    `verification_state` value" to an endpoint that never exposes that
+    value in the first place would be a flag with no observable effect a
+    caller could rely on.
+  - **REST: flips `status` from `"completed"` to `"failed"` (with `error`
+    explaining why), not a new third `status` value.** Every existing
+    poller already branches on exactly two terminal values
+    (`"completed"`/`"failed"`) per `_TaskRecord`'s own docstring — reusing
+    that existing contract means a caller who adopts `require_verification`
+    needs zero new code to detect the failure, only to opt into the flag.
+  - **WS: sends a `{"type": "error", ...}` frame instead of `{"type":
+    "result", ...}`, for the identical reason** — `"error"` was already a
+    real frame type every client must already handle, so this needed no
+    new frame type either.
+  - **`require_verification` only ever special-cases `"inconclusive"`,
+    never any other `verification_state`.** Every other state already has
+    well-defined, independently-decided pass/fail semantics from earlier
+    work in this file (`retry_exhausted`/`no_progress`/`timed_out`/
+    `incomplete`/`confirmation_required`/`stuck` are already nonzero/
+    `"failed"` unconditionally; `verified` is already the only real
+    success) — this flag's entire scope is the one state that was
+    previously being treated as "not a failure" by design, and widening
+    its scope to touch other states was never asked for and would blur a
+    single-purpose flag into something broader.
 - **Project path containment (`resolve_project_dir`): a real security bug,
   not just missing hardening, fixed with one shared resolver in
   `config.py` rather than a fix duplicated in `cli.py` and `server.py`.**
