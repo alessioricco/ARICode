@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import urllib.error
@@ -13,6 +14,7 @@ from urllib.parse import urlparse
 
 from openhands.sdk.event import ActionEvent
 
+from .acceptance import AcceptanceCheck, AcceptanceCheckError, parse_acceptance_checks
 from .config import ConfigError, load_config, override_llm, resolve_project_dir
 from .runner import run_task
 from .skills import write_project_context
@@ -65,6 +67,41 @@ def resolve_task_source(value: str) -> str:
     if not content:
         raise ValueError(f"Task content from {value!r} is empty")
     return content
+
+
+def resolve_acceptance_checks(value: str) -> list[AcceptanceCheck]:
+    """Resolve the `--acceptance-checks` argument to parsed `AcceptanceCheck`
+    objects — a JSON array of check definitions, either read from an
+    existing local file or given inline (same "existing file wins over
+    literal text" pattern as `resolve_task_source`, minus the URL-fetch
+    case: an acceptance-check *list* has no legitimate reason to come from
+    a remote URL the way a task description might).
+    """
+    if os.path.isfile(value):
+        try:
+            with open(value, encoding="utf-8") as f:
+                raw = f.read()
+        except OSError as exc:
+            raise ValueError(f"Failed to read acceptance checks file {value!r}: {exc}") from exc
+    else:
+        raw = value
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"--acceptance-checks must be valid JSON: {exc}") from exc
+    if not isinstance(data, list):
+        # ValueError, not TypeError (ruff's TRY004 suggestion): every error
+        # this function raises must be a ValueError so main()'s single
+        # `except ValueError` catches all of them uniformly.
+        raise ValueError(  # noqa: TRY004
+            "--acceptance-checks must be a JSON array of check objects."
+        )
+
+    try:
+        return parse_acceptance_checks(data)
+    except AcceptanceCheckError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -149,6 +186,23 @@ def _build_parser() -> argparse.ArgumentParser:
             "broken, only unproven."
         ),
     )
+    parser.add_argument(
+        "--acceptance-checks",
+        default=None,
+        help=(
+            "Optional, opt-in machine-checkable acceptance criteria: a JSON "
+            "array of check objects, either given inline or as a path to a "
+            "local JSON file. Each object is "
+            '{"kind": "file_exists"|"file_contains", "path": "relative/path", '
+            '"contains": "text" (file_contains only), "required": true '
+            '(default), "description": "..."}. `path` is always resolved '
+            "relative to the task's own workspace and cannot escape it "
+            "(absolute paths and '..' are rejected). A failing required "
+            "check downgrades an otherwise-'verified' result to "
+            "'acceptance_failed'; a failing optional check is recorded but "
+            "never blocks 'verified'."
+        ),
+    )
     return parser
 
 
@@ -200,9 +254,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.agents_md is not None:
         write_project_context(cfg.workspace, args.agents_md)
 
+    acceptance_checks: list[AcceptanceCheck] | None = None
+    if args.acceptance_checks is not None:
+        try:
+            acceptance_checks = resolve_acceptance_checks(args.acceptance_checks)
+        except ValueError as exc:
+            print(f"Configuration error: {exc}", file=sys.stderr)
+            return 1
+
     on_confirm = _confirm_pending_actions if cfg.confirm_mode == "always" else None
     try:
-        messages = run_task(task, cfg=cfg, on_confirm=on_confirm)
+        messages = run_task(
+            task, cfg=cfg, on_confirm=on_confirm, acceptance_checks=acceptance_checks
+        )
     except Exception as exc:  # noqa: BLE001 - surfaced as a clean CLI error, not a traceback
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -219,13 +283,14 @@ def main(argv: list[str] | None = None) -> int:
     # verification failed and couldn't be fixed, made no observable progress
     # on a fix attempt, kept timing out, whose own task_tracker list was
     # left incomplete, needed a confirm-mode approval nobody could answer,
-    # ran out of its shared HARNESS_MAX_TASK_SECONDS budget, or whose run
-    # never reached a coherent finish, is a nonzero exit; "inconclusive"
-    # (nothing runnable to check) is not an error but is still printed so
-    # it isn't mistaken for a confirmed pass — unless --require-verification
-    # opted into treating "nothing was checked" as a failure too (off by
-    # default: this is a real behavior change a caller must ask for, not a
-    # silent default flip — see ROADMAP.md).
+    # ran out of its shared HARNESS_MAX_TASK_SECONDS budget, failed a
+    # required --acceptance-checks criterion, or whose run never reached a
+    # coherent finish, is a nonzero exit; "inconclusive" (nothing runnable
+    # to check) is not an error but is still printed so it isn't mistaken
+    # for a confirmed pass — unless --require-verification opted into
+    # treating "nothing was checked" as a failure too (off by default: this
+    # is a real behavior change a caller must ask for, not a silent default
+    # flip — see ROADMAP.md).
     outcome = messages.outcome
     print(f"\nVerification: {outcome.verification_state}")
     for note in outcome.completion_contract.limitations:
@@ -237,6 +302,7 @@ def main(argv: list[str] | None = None) -> int:
         "incomplete",
         "confirmation_required",
         "budget_exhausted",
+        "acceptance_failed",
         "stuck",
     ):
         return 1

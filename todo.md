@@ -118,19 +118,23 @@ updated on the first pass), fixed and re-verified, with a dedicated
 regression test confirmed to fail against the unfixed code. See
 `ROADMAP.md` decisions log and `MANUAL.md` "Task budget".
 
-### 9. Add machine-checkable acceptance criteria
-`CompletionContract.acceptance_criteria` (`runner.py`) is just descriptive
-strings today ("The task described in the original request is
-implemented.") — never independently evaluated against anything, so it
-records what should be true without ever checking it. Add an optional
-structured acceptance-check field to CLI/API task requests, with safe,
-language-neutral checks such as expected files, commands, or exit statuses.
-Evaluate these checks alongside tests and builds, include their results in
-`TaskOutcome`, and make a failed required criterion block a `verified`
-result. Keep this opt-in until the contract and security model are
-settled (an arbitrary caller-supplied "command" check is itself a command-
-injection-shaped surface worth scoping carefully — see item #6's path-
-containment issue for the same class of risk).
+### 9. ~~Add machine-checkable acceptance criteria~~ — DONE (scoped down)
+Added `src/harness/acceptance.py`: opt-in, caller-supplied acceptance
+checks, evaluated by the harness after the run and folded into a new
+`TaskOutcome.acceptance_results` field. Deliberately scoped to
+`file_exists`/`file_contains` only — no "run a command" kind, exactly the
+risk this item itself called out: a harness-triggered command-execution
+surface compounding with server mode's missing auth (item #5). `path` is
+always contained to the task's workspace (mirrors `resolve_project_dir`'s
+symlink-aware containment check, item #6). A failing *required* check
+downgrades an otherwise-`"verified"` result to a new `"acceptance_failed"`
+terminal state; every other state is left alone. Wired into both `cli.py`
+(`--acceptance-checks`, file-or-inline JSON) and `server.py`
+(`TaskRequest.acceptance_checks`, `POST /tasks`/`WS /tasks/stream`), not
+the OpenAI-compatible adapter (same reasoning as `require_verification`).
+Verified live end-to-end via both the real CLI and a real running server
+(`curl` against `POST /tasks`/`GET /tasks/{id}`). See `ROADMAP.md`
+decisions log and `MANUAL.md` "Acceptance checks".
 
 ---
 

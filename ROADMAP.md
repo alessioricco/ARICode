@@ -42,6 +42,32 @@ build plan. This file is the living, evolving companion to that static plan.
   see "Decisions log" below for why this, not a reverse-engineered
   cumulative iteration count, closes the "one `HARNESS_MAX_ITERATIONS`
   doesn't bound a whole task" gap.
+- `acceptance.py` — optional, caller-supplied machine-checkable acceptance
+  criteria for one specific task, evaluated by the harness after the run,
+  never agent-facing or agent-defined. Deliberately scoped to two check
+  kinds only — `file_exists`, `file_contains` — with no "run this command"
+  kind, even though that was one of the kinds originally proposed; see
+  "Decisions log" below for the security reasoning (a caller-triggered
+  command-execution surface compounding with server mode's lack of auth).
+  `path` is always resolved relative to the task's workspace via its own
+  containment check — mirrors `config.resolve_project_dir`'s logic
+  (reject absolute/`..` outright, then a symlink-followed containment
+  check) but is a separate implementation, not a shared one, since the two
+  have different roots and error-message context (same "duplication over
+  premature abstraction" call as elsewhere in this codebase).
+  `AcceptanceCheckError` subclasses `ValueError` so both `cli.py`'s and
+  `server.py`'s existing exception handling catches it with zero new
+  wiring. Wired into `runner.py` via `TaskOutcome.acceptance_results` and
+  a new `"acceptance_failed"` terminal state (only reachable by
+  downgrading what would otherwise be `"verified"` — every other state is
+  already a failure of some kind and is left untouched), applied once as
+  the very last step of `stream_task` regardless of which phase produced
+  the underlying outcome. `cli.py`'s `--acceptance-checks` and
+  `server.py`'s `TaskRequest.acceptance_checks` both accept the same JSON
+  shape; the OpenAI-compatible adapter does not (same reasoning as
+  `require_verification`: it doesn't surface `verification_state`, so a
+  flag whose only effect is on that value would have no observable
+  effect there).
 - `llm.py` / `tools.py` / `agent.py` — SDK wiring; default preset tools + `run_tests`.
   `llm.py`'s `build_llm()` only passes `reasoning_effort` to the SDK's `LLM(...)`
   when `cfg.reasoning_effort` is set, so the SDK's own default (`"high"`)
@@ -166,17 +192,22 @@ build plan. This file is the living, evolving companion to that static plan.
   verified vs. only detected per language.
 - `cli.py` — `python -m harness "<task>" [--execution] [--project] [--agents-md]
   [--model] [--api-key] [--base-url] [--reasoning-effort]
-  [--require-verification]`. `task` is resolved via `resolve_task_source()`:
-  http(s) URL (fetched) or an existing local file (read) take precedence
-  over literal text. CLI-only — server mode's `task` field does not do this
-  resolution. `--require-verification` (off by default) makes an
-  `inconclusive` verification result exit nonzero too, matched on the
-  server side by `TaskRequest.require_verification` (`POST /tasks` flips
-  `status` from `"completed"` to `"failed"` for that one case; `WS
-  /tasks/stream` sends a `"type": "error"` frame instead of `"result"`) —
-  every other `verification_state` is unaffected either way. See MANUAL.md
-  "CLI reference" and "Server mode" and decisions log below for why this
-  is opt-in rather than a flipped default.
+  [--require-verification] [--acceptance-checks]`. `task` is resolved via
+  `resolve_task_source()`: http(s) URL (fetched) or an existing local file
+  (read) take precedence over literal text. CLI-only — server mode's `task`
+  field does not do this resolution. `--require-verification` (off by
+  default) makes an `inconclusive` verification result exit nonzero too,
+  matched on the server side by `TaskRequest.require_verification`
+  (`POST /tasks` flips `status` from `"completed"` to `"failed"` for that
+  one case; `WS /tasks/stream` sends a `"type": "error"` frame instead of
+  `"result"`) — every other `verification_state` is unaffected either way.
+  See MANUAL.md "CLI reference" and "Server mode" and decisions log below
+  for why this is opt-in rather than a flipped default.
+  `resolve_acceptance_checks()` resolves `--acceptance-checks` the same
+  "existing file wins over literal text" way `resolve_task_source()`
+  resolves `task` (minus the URL-fetch case), parses the JSON via
+  `acceptance.parse_acceptance_checks()`, and reports any error as a
+  `Configuration error: ...` before `run_task` is ever called.
 - `workspace.py` — single dispatch point for execution backends
   (`build_workspace(cfg)`); `local` returns a plain path, `docker` returns a
   `DockerWorkspace`, both as context managers so cleanup is automatic.
@@ -196,7 +227,14 @@ build plan. This file is the living, evolving companion to that static plan.
   `require_verification` field (default `false`), the server-side
   counterpart to `cli.py`'s `--require-verification` — deliberately not
   added to `/v1/chat/completions`, which doesn't surface `verification_state`
-  at all (see the matching backlog entry).
+  at all (see the matching backlog entry). Both also accept an optional
+  `acceptance_checks` field (a JSON array, same shape as CLI
+  `--acceptance-checks`, always inline — no file-path resolution
+  server-side); `_TaskRecord.acceptance_results` and the WS `"result"`
+  frame both expose `TaskOutcome.acceptance_results` (`asdict`-serialized)
+  regardless of whether anything was downgraded, same "always visible, not
+  just on override" treatment as `completion_contract`. Also not added to
+  `/v1/chat/completions`, for the same reason.
 - `skills.py` — two mechanisms, don't conflate them: `load_skill_catalog()`
   loads the shared, reusable, trigger-based catalog (`skills/`, arbitrary
   subfolders for classification) into every agent's `AgentContext`
@@ -559,6 +597,77 @@ build plan. This file is the living, evolving companion to that static plan.
 
 ## Decisions log (why, not just what)
 
+- **Machine-checkable acceptance criteria: scoped down to `file_exists`/
+  `file_contains` only, deliberately dropping the "run a command" check
+  kind the original ask explicitly named.** The item's own text flagged
+  this itself ("an arbitrary caller-supplied 'command' check is itself a
+  command-injection-shaped surface worth scoping carefully"), so this
+  wasn't discovered mid-implementation — it was the central scoping
+  decision made before writing any code. The distinguishing factor from
+  "the agent can already run arbitrary commands via its own terminal
+  tool" (already true, already accepted): a command-type acceptance check
+  would be a check the *harness itself* runs, triggered directly by
+  whatever a caller puts in a request field — no agent step, no
+  confirm-mode gate (`HARNESS_CONFIRM_MODE=always`, see the matching
+  decisions-log entry above, has no bearing on harness-triggered
+  execution), no review of any kind in between. Combined with server
+  mode's standing lack of authentication (`todo.md`'s server-auth item),
+  a command kind would hand an unauthenticated network caller direct code
+  execution on the host — a strictly worse, and new, surface compared to
+  what already exists. A caller-supplied file *path* check doesn't have
+  this problem once properly contained (see below), so `file_exists`/
+  `file_contains` were kept and command execution was dropped rather than
+  attempting to "sandbox" it — there's no sandboxing primitive already
+  available in this harness that would make a caller-controlled `exec`
+  actually safe over an unauthenticated network endpoint.
+  - **Path containment reuses `config.resolve_project_dir`'s exact logic
+    (reject absolute/`..` outright, then a symlink-followed containment
+    check) but as a separate implementation in `acceptance.py`, not a
+    shared function.** Considered extracting a shared
+    `resolve_contained_path()` primitive — rejected: the two callers have
+    different roots (a task's workspace here, `HARNESS_PROJECTS_DIR`
+    there) and, more concretely, `resolve_project_dir` already has
+    passing tests asserting on its exact error-message wording (`"Project
+    name must be relative..."`, `"...escapes HARNESS_PROJECTS_DIR"`);
+    parameterizing the wording to serve both callers risked either
+    breaking those assertions or producing a generic message worse for
+    both. A ~15-line near-duplicate, clearly cross-referenced in both
+    docstrings, was judged cheaper and lower-risk than refactoring
+    already-verified, security-critical code — matches this project's own
+    stated "three similar lines is better than a premature abstraction"
+    guidance (`CLAUDE.md`).
+  - **A read-size cap (`_MAX_FILE_READ_BYTES = 1_000_000`) for
+    `file_contains`, not an unbounded read.** A "does this file contain
+    X" check has no legitimate reason to need more than a modest prefix
+    of a file; without a cap, a caller (again, potentially unauthenticated
+    over the network) could point a check at an arbitrarily large file
+    and impose real memory/CPU cost on the harness process for every
+    request. Truncation is reported in the result's `detail` text rather
+    than silently applied, so a check that fails because the match falls
+    outside the read window is visibly different from one that fails
+    because the text is genuinely absent.
+  - **A new `"acceptance_failed"` terminal state, applied once at the very
+    end of `stream_task` via `_apply_acceptance_checks`, wrapping
+    whichever `TaskOutcome` came back from any of the three phases —
+    not evaluated inside `_verify_and_report` itself, and not retried.**
+    Matches the item's literal ask ("make a failed required criterion
+    block a verified result") precisely: the override only ever fires
+    when the *existing* logic would have reported `"verified"`, since
+    every other terminal state already represents some other failure with
+    nothing left to "block". Deliberately does not trigger a retry cycle
+    the way a failing test does — the item didn't ask for that, and
+    bolting acceptance-check failures onto the existing test-retry loop
+    (which is keyed on `VerificationRun`/`CheckOutcome`, a different
+    vocabulary than `AcceptanceCheckResult`) would have been a much larger
+    change for a request that only asked for detection and blocking, not
+    automated remediation. `acceptance_results` is still attached and
+    `acceptance_criteria`/`limitations` still extended even when nothing
+    is downgraded (or when the underlying state already wasn't
+    `"verified"`), so a caller always sees exactly what was checked.
+  - **Not added to `/v1/chat/completions`**, for the same reason
+    `require_verification` wasn't: that adapter's wire format has no
+    field for `verification_state` at all, so a flag whose only effect is
+    changing that value would have no observable effect through it.
 - **Global task execution budget: a wall-clock deadline
   (`HARNESS_MAX_TASK_SECONDS`), not a reverse-engineered cumulative
   iteration counter.** The gap itself was concrete and already precisely

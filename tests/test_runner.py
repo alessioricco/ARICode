@@ -20,6 +20,7 @@ from openhands.sdk.event import ObservationEvent
 from openhands.tools.task_tracker import TaskTrackerObservation, TaskTrackerTool
 
 from harness import runner
+from harness.acceptance import AcceptanceCheck
 from harness.config import Config, ConfigError, load_config
 from harness.custom_tools.run_tests_tool import CheckOutcome, VerificationRun
 
@@ -1315,3 +1316,168 @@ def test_no_progress_check_does_not_apply_after_successful_recovery(monkeypatch)
 
     assert outcome.verification_state == "verified"
     assert emitted == []
+
+
+# --- _apply_acceptance_checks: caller-supplied acceptance criteria ---------
+
+
+def _outcome(verification_state: str = "verified") -> runner.TaskOutcome:
+    contract = runner.CompletionContract(
+        goal="do the thing", acceptance_criteria=[], verification_checks=[], limitations=[]
+    )
+    return runner.TaskOutcome(verification_state=verification_state, completion_contract=contract)
+
+
+def test_apply_acceptance_checks_is_a_noop_when_none_given(tmp_path):
+    outcome = _outcome()
+
+    result = runner._apply_acceptance_checks(
+        outcome, _cfg(workspace=str(tmp_path)), lambda _m: None, None
+    )
+
+    assert result is outcome
+
+
+def test_apply_acceptance_checks_is_a_noop_when_empty_list(tmp_path):
+    outcome = _outcome()
+
+    result = runner._apply_acceptance_checks(
+        outcome, _cfg(workspace=str(tmp_path)), lambda _m: None, []
+    )
+
+    assert result is outcome
+
+
+def test_apply_acceptance_checks_all_pass_keeps_verified(tmp_path):
+    (tmp_path / "README.md").write_text("# Usage\n...")
+    outcome = _outcome("verified")
+    checks = [AcceptanceCheck(kind="file_exists", path="README.md")]
+
+    result = runner._apply_acceptance_checks(
+        outcome, _cfg(workspace=str(tmp_path)), lambda _m: None, checks
+    )
+
+    assert result.verification_state == "verified"
+    assert len(result.acceptance_results) == 1
+    assert result.acceptance_results[0].passed is True
+    assert result.completion_contract.limitations == []
+    assert any("README.md" in c for c in result.completion_contract.acceptance_criteria)
+
+
+def test_apply_acceptance_checks_required_failure_downgrades_verified(tmp_path):
+    outcome = _outcome("verified")
+    checks = [AcceptanceCheck(kind="file_exists", path="OUTPUT.txt", description="the output file")]
+    emitted = []
+
+    result = runner._apply_acceptance_checks(
+        outcome, _cfg(workspace=str(tmp_path)), emitted.append, checks
+    )
+
+    assert result.verification_state == "acceptance_failed"
+    assert result.acceptance_results[0].passed is False
+    assert any("the output file" in note for note in result.completion_contract.limitations)
+    assert len(emitted) == 1
+    assert "acceptance check" in emitted[0].content[0].text.lower()
+
+
+def test_apply_acceptance_checks_optional_failure_does_not_downgrade(tmp_path):
+    outcome = _outcome("verified")
+    checks = [AcceptanceCheck(kind="file_exists", path="OUTPUT.txt", required=False)]
+    emitted = []
+
+    result = runner._apply_acceptance_checks(
+        outcome, _cfg(workspace=str(tmp_path)), emitted.append, checks
+    )
+
+    assert result.verification_state == "verified"  # unaffected — the check wasn't required
+    assert result.acceptance_results[0].passed is False
+    assert any(
+        "Optional acceptance check failed" in note
+        for note in result.completion_contract.limitations
+    )
+    assert emitted == []  # no give-up notice — nothing was blocked
+
+
+def test_apply_acceptance_checks_does_not_override_a_non_verified_state(tmp_path):
+    # A run that already ended in some other failure state (retry_exhausted,
+    # stuck, etc.) has nothing left to "block" — acceptance results are
+    # still attached for visibility, but the original state is preserved.
+    outcome = _outcome("retry_exhausted")
+    checks = [AcceptanceCheck(kind="file_exists", path="OUTPUT.txt")]
+
+    result = runner._apply_acceptance_checks(
+        outcome, _cfg(workspace=str(tmp_path)), lambda _m: None, checks
+    )
+
+    assert result.verification_state == "retry_exhausted"
+    assert result.acceptance_results[0].passed is False
+
+
+def test_apply_acceptance_checks_rejects_a_path_escape_without_crashing(tmp_path):
+    # evaluate_acceptance_check turns a rejected path into a failed result,
+    # not an exception — _apply_acceptance_checks must not need to know that.
+    outcome = _outcome("verified")
+    checks = [AcceptanceCheck(kind="file_exists", path="/etc/passwd", required=True)]
+
+    result = runner._apply_acceptance_checks(
+        outcome, _cfg(workspace=str(tmp_path)), lambda _m: None, checks
+    )
+
+    assert result.verification_state == "acceptance_failed"
+    assert result.acceptance_results[0].passed is False
+    assert "absolute" in result.acceptance_results[0].detail
+
+
+def test_stream_task_applies_acceptance_checks_end_to_end(monkeypatch, tmp_path):
+    (tmp_path / "OUTPUT.txt").write_text("done")
+    conversation = _RecordingConversation()
+    monkeypatch.setattr(runner, "Conversation", lambda **_kwargs: conversation)
+    monkeypatch.setattr(runner, "build_agent", lambda cfg: "fake-agent")
+    monkeypatch.setattr(runner, "build_workspace", lambda cfg: nullcontext(str(tmp_path)))
+    monkeypatch.setattr(runner, "_enforce_task_tracker_completion", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        runner,
+        "_verify_and_report",
+        lambda *a, **kw: runner.TaskOutcome(
+            verification_state="verified",
+            completion_contract=runner.CompletionContract(
+                goal="", acceptance_criteria=[], verification_checks=[], limitations=[]
+            ),
+        ),
+    )
+
+    outcome = runner.stream_task(
+        "do the thing",
+        cfg=_cfg(workspace=str(tmp_path)),
+        acceptance_checks=[AcceptanceCheck(kind="file_exists", path="OUTPUT.txt")],
+    )
+
+    assert outcome.verification_state == "verified"
+    assert len(outcome.acceptance_results) == 1
+    assert outcome.acceptance_results[0].passed is True
+
+
+def test_stream_task_acceptance_check_failure_downgrades_a_real_verified_run(monkeypatch, tmp_path):
+    conversation = _RecordingConversation()
+    monkeypatch.setattr(runner, "Conversation", lambda **_kwargs: conversation)
+    monkeypatch.setattr(runner, "build_agent", lambda cfg: "fake-agent")
+    monkeypatch.setattr(runner, "build_workspace", lambda cfg: nullcontext(str(tmp_path)))
+    monkeypatch.setattr(runner, "_enforce_task_tracker_completion", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        runner,
+        "_verify_and_report",
+        lambda *a, **kw: runner.TaskOutcome(
+            verification_state="verified",
+            completion_contract=runner.CompletionContract(
+                goal="", acceptance_criteria=[], verification_checks=[], limitations=[]
+            ),
+        ),
+    )
+
+    outcome = runner.stream_task(
+        "do the thing",
+        cfg=_cfg(workspace=str(tmp_path)),
+        acceptance_checks=[AcceptanceCheck(kind="file_exists", path="OUTPUT.txt")],
+    )
+
+    assert outcome.verification_state == "acceptance_failed"

@@ -9,7 +9,7 @@ import os
 import re
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from openhands.sdk import (
     Conversation,
@@ -24,12 +24,13 @@ from openhands.sdk.event import ActionEvent, ObservationEvent
 from openhands.sdk.security.confirmation_policy import AlwaysConfirm
 from openhands.tools.task_tracker import TaskTrackerTool
 
+from .acceptance import AcceptanceCheck, AcceptanceCheckResult, evaluate_acceptance_checks
 from .agent import build_agent
 from .config import Config, load_config
 from .custom_tools.run_tests_tool import CheckOutcome, VerificationRun, run_full_verification
 from .workspace import build_workspace
 
-# The ten terminal states a task run can end in. Exactly these because
+# The eleven terminal states a task run can end in. Exactly these because
 # they're the ones a caller needs to tell apart to know whether to trust a
 # "done" claim: real, confirmed success; no evidence either way; a confirmed
 # problem that automated retries couldn't fix; a fix attempt that produced
@@ -47,13 +48,17 @@ from .workspace import build_workspace
 # across the initial run and every retry phase combined — distinct from a
 # single `conversation.run()` call hitting its own `max_iteration_per_run`
 # (which resets on every call and so cannot bound a whole task on its own,
-# see ROADMAP.md's decisions log); and a run that never reached a coherent
-# finish at all. "failed" itself is never a *final* value here — it's the
-# transient signal inside the retry loop between "a check just failed" and
-# "was it fixed, or did retries run out" (see `_verify_and_report`); it's
-# listed because `VerificationRun.state` (run_tests_tool.py) uses the same
-# vocabulary and a caller may inspect a `TaskOutcome.checks` mid-analysis.
-# See MANUAL.md "Test verification" and ROADMAP.md's decisions log.
+# see ROADMAP.md's decisions log); a caller-supplied, machine-checkable
+# acceptance criterion (see `acceptance.py`) that was marked `required` and
+# failed, downgrading what would otherwise have been `verified` — the only
+# state a caller opts into by supplying `acceptance_checks` at all; and a
+# run that never reached a coherent finish at all. "failed" itself is never
+# a *final* value here — it's the transient signal inside the retry loop
+# between "a check just failed" and "was it fixed, or did retries run out"
+# (see `_verify_and_report`); it's listed because `VerificationRun.state`
+# (run_tests_tool.py) uses the same vocabulary and a caller may inspect a
+# `TaskOutcome.checks` mid-analysis. See MANUAL.md "Test verification" and
+# ROADMAP.md's decisions log.
 VERIFICATION_STATES = (
     "verified",
     "failed",
@@ -64,6 +69,7 @@ VERIFICATION_STATES = (
     "incomplete",
     "confirmation_required",
     "budget_exhausted",
+    "acceptance_failed",
     "stuck",
 )
 
@@ -114,6 +120,12 @@ class TaskOutcome:
     completion_contract: CompletionContract
     checks: tuple[CheckOutcome, ...] = ()
     retries_used: int = 0
+    # Only non-empty when the caller supplied acceptance_checks — see
+    # _apply_acceptance_checks. Evaluated regardless of verification_state
+    # (even a stuck/incomplete run's workspace is still worth checking),
+    # but only a required check's failure can downgrade verification_state
+    # itself (from "verified" to "acceptance_failed").
+    acceptance_results: tuple[AcceptanceCheckResult, ...] = ()
 
     @property
     def success(self) -> bool:
@@ -766,11 +778,72 @@ def _enforce_task_tracker_completion(
     return None
 
 
+def _apply_acceptance_checks(
+    outcome: TaskOutcome,
+    cfg: Config,
+    emit: Callable[[Message], None],
+    checks: Sequence[AcceptanceCheck] | None,
+) -> TaskOutcome:
+    """Evaluate caller-supplied `acceptance_checks` against `cfg.workspace`
+    and fold the results into `outcome` — applied once, as the very last
+    step of `stream_task`, to whichever `TaskOutcome` came back from any
+    phase (initial run, task_tracker, or project verification).
+
+    A no-op when `checks` is empty/`None` — this feature is opt-in
+    (`acceptance.py`'s own scope note applies: only `file_exists`/
+    `file_contains` kinds exist, deliberately no command-execution kind),
+    so a caller that never supplies `acceptance_checks` sees zero behavior
+    change. Evaluated regardless of `verification_state` — even a stuck or
+    incomplete run's workspace is still worth reporting on — but only
+    overrides `verification_state` itself when it would otherwise be
+    `"verified"` and a *required* check failed: every other state already
+    represents some other failure, so there's nothing left to "block".
+    """
+    if not checks:
+        return outcome
+
+    results = evaluate_acceptance_checks(cfg.workspace, checks)
+    failed_required = [r for r in results if r.check.required and not r.passed]
+
+    criteria = list(outcome.completion_contract.acceptance_criteria)
+    limitations = list(outcome.completion_contract.limitations)
+    for result in results:
+        label = result.check.description or f"{result.check.kind} {result.check.path}"
+        criteria.append(label)
+        if not result.passed:
+            kind_text = "Required" if result.check.required else "Optional"
+            limitations.append(f"{kind_text} acceptance check failed ({label}): {result.detail}")
+
+    new_state = outcome.verification_state
+    if failed_required and outcome.verification_state == "verified":
+        new_state = "acceptance_failed"
+        summary = "; ".join(
+            f"{r.check.description or r.check.path}: {r.detail}" for r in failed_required
+        )
+        _emit_notice(
+            emit,
+            "Harness acceptance check: the project's own tests/build passed, "
+            f"but {len(failed_required)} required acceptance check(s) failed "
+            f"({summary}). Not reporting this as verified.",
+        )
+
+    contract = replace(
+        outcome.completion_contract, acceptance_criteria=criteria, limitations=limitations
+    )
+    return replace(
+        outcome,
+        verification_state=new_state,
+        completion_contract=contract,
+        acceptance_results=tuple(results),
+    )
+
+
 def stream_task(
     task: str,
     cfg: Config | None = None,
     on_message: Callable[[Message], None] | None = None,
     on_confirm: ConfirmCallback | None = None,
+    acceptance_checks: Sequence[AcceptanceCheck] | None = None,
 ) -> TaskOutcome:
     """Run a task, invoking `on_message` with each message as it's produced,
     and return the terminal `TaskOutcome` once verification has settled.
@@ -779,7 +852,8 @@ def stream_task(
     endpoint (pushes each message to the client as it arrives). `on_confirm`
     is only consulted when `cfg.confirm_mode == "always"` (see
     `_run_with_confirmation`); `cli.py` supplies a real terminal-prompting
-    implementation, `server.py` leaves it unset.
+    implementation, `server.py` leaves it unset. `acceptance_checks` is
+    entirely optional — see `_apply_acceptance_checks`.
     """
     if cfg is None:
         cfg = load_config()
@@ -817,19 +891,27 @@ def stream_task(
         conversation.send_message(task)
         run_result = _run_with_confirmation(conversation, cfg, emit, on_confirm, deadline)
         outcome = _outcome_for_run_result(run_result, task, cfg)
-        if outcome is not None:
-            return outcome
-        tracker_outcome = _enforce_task_tracker_completion(
-            conversation, cfg, emit, task, on_confirm, deadline
-        )
-        if tracker_outcome is not None:
-            return tracker_outcome
-        return _verify_and_report(conversation, cfg, emit, task, on_confirm, deadline)
+        if outcome is None:
+            outcome = _enforce_task_tracker_completion(
+                conversation, cfg, emit, task, on_confirm, deadline
+            )
+        if outcome is None:
+            outcome = _verify_and_report(conversation, cfg, emit, task, on_confirm, deadline)
+        return _apply_acceptance_checks(outcome, cfg, emit, acceptance_checks)
 
 
 def run_task(
-    task: str, cfg: Config | None = None, on_confirm: ConfirmCallback | None = None
+    task: str,
+    cfg: Config | None = None,
+    on_confirm: ConfirmCallback | None = None,
+    acceptance_checks: Sequence[AcceptanceCheck] | None = None,
 ) -> TaskResult:
     messages: list = []
-    outcome = stream_task(task, cfg=cfg, on_message=messages.append, on_confirm=on_confirm)
+    outcome = stream_task(
+        task,
+        cfg=cfg,
+        on_message=messages.append,
+        on_confirm=on_confirm,
+        acceptance_checks=acceptance_checks,
+    )
     return TaskResult(messages, outcome)  # last message is the final assistant output

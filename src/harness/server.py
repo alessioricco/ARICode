@@ -17,6 +17,7 @@ import uuid
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
+from .acceptance import parse_acceptance_checks
 from .config import Config, ConfigError, load_config, override_llm, resolve_project_dir
 from .runner import run_task, stream_task
 from .skills import write_project_context
@@ -133,6 +134,7 @@ class _TaskRecord:
     # `status` says "completed".
     verification_state: str | None = None
     completion_contract: dict[str, Any] | None = None
+    acceptance_results: list[dict[str, Any]] | None = None
 
 
 def create_app():
@@ -161,6 +163,11 @@ def create_app():
         # explicitly opts in — same rationale and same default as the CLI's
         # --require-verification (see cli.py/ROADMAP.md).
         require_verification: bool = False
+        # Optional, opt-in machine-checkable acceptance criteria — same
+        # meaning and same JSON shape as CLI's --acceptance-checks (see
+        # acceptance.py). A failing required check downgrades an
+        # otherwise-"verified" result to "acceptance_failed".
+        acceptance_checks: list[dict] | None = None
 
     class ChatMessage(BaseModel):
         role: str
@@ -188,7 +195,9 @@ def create_app():
     tasks: dict[str, _TaskRecord] = {}
     tasks_lock = threading.Lock()
 
-    def run_in_background(record: _TaskRecord, cfg: Config, require_verification: bool) -> None:
+    def run_in_background(
+        record: _TaskRecord, cfg: Config, require_verification: bool, acceptance_checks
+    ) -> None:
         with tasks_lock:
             record.status = "running"
             record.updated_at = time.time()
@@ -199,10 +208,17 @@ def create_app():
                 record.updated_at = time.time()
 
         try:
-            outcome = stream_task(record.task, cfg=cfg, on_message=on_message)
+            outcome = stream_task(
+                record.task, cfg=cfg, on_message=on_message, acceptance_checks=acceptance_checks
+            )
             with tasks_lock:
                 record.verification_state = outcome.verification_state
                 record.completion_contract = asdict(outcome.completion_contract)
+                record.acceptance_results = (
+                    [asdict(r) for r in outcome.acceptance_results]
+                    if outcome.acceptance_results
+                    else None
+                )
                 if require_verification and outcome.verification_state == "inconclusive":
                     record.status = "failed"
                     record.error = (
@@ -239,7 +255,12 @@ def create_app():
                 base_url=request.base_url,
                 reasoning_effort=request.reasoning_effort,
             )
-        except (ConfigError, ValueError) as exc:
+            acceptance_checks = (
+                parse_acceptance_checks(request.acceptance_checks)
+                if request.acceptance_checks
+                else None
+            )
+        except (ConfigError, ValueError) as exc:  # AcceptanceCheckError is a ValueError
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         record = _TaskRecord(id=str(uuid.uuid4()), task=request.task)
@@ -247,7 +268,7 @@ def create_app():
             tasks[record.id] = record
         threading.Thread(
             target=run_in_background,
-            args=(record, cfg, request.require_verification),
+            args=(record, cfg, request.require_verification, acceptance_checks),
             daemon=True,
         ).start()
 
@@ -272,6 +293,7 @@ def create_app():
                 # for whether it was actually confirmed working.
                 "verification_state": record.verification_state,
                 "completion_contract": record.completion_contract,
+                "acceptance_results": record.acceptance_results,
                 "messages": list(record.messages),
                 "error": record.error,
             }
@@ -291,7 +313,12 @@ def create_app():
                 base_url=request.base_url,
                 reasoning_effort=request.reasoning_effort,
             )
-        except (ConfigError, ValueError) as exc:
+            acceptance_checks = (
+                parse_acceptance_checks(request.acceptance_checks)
+                if request.acceptance_checks
+                else None
+            )
+        except (ConfigError, ValueError) as exc:  # AcceptanceCheckError is a ValueError
             await websocket.send_json({"type": "error", "detail": str(exc)})
             await websocket.close()
             return
@@ -303,7 +330,12 @@ def create_app():
 
         def run() -> None:
             try:
-                outcome = stream_task(request.task, cfg=cfg, on_message=on_message)
+                outcome = stream_task(
+                    request.task,
+                    cfg=cfg,
+                    on_message=on_message,
+                    acceptance_checks=acceptance_checks,
+                )
                 if request.require_verification and outcome.verification_state == "inconclusive":
                     detail = (
                         "Verification was inconclusive and require_verification=true "
@@ -317,6 +349,8 @@ def create_app():
                             "type": "result",
                             "verification_state": outcome.verification_state,
                             "completion_contract": asdict(outcome.completion_contract),
+                            "acceptance_results": [asdict(r) for r in outcome.acceptance_results]
+                            or None,
                         }
                     )
             except Exception as exc:  # noqa: BLE001 - surfaced to the client, not raised

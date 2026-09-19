@@ -86,7 +86,8 @@ template with every variable documented inline.
 ```bash
 uv run python -m harness "<task>" [--execution {local,docker}] [--project NAME] \
     [--agents-md TEXT] [--model MODEL] [--api-key KEY] [--base-url URL] \
-    [--reasoning-effort LEVEL] [--require-verification]
+    [--reasoning-effort LEVEL] [--require-verification] \
+    [--acceptance-checks JSON_OR_FILE]
 ```
 
 (Also installed as a console script: `harness "<task>" ...`, once the package
@@ -122,6 +123,10 @@ is installed via `uv pip install -e .`.)
   pass/fail signal on the exit code alone (rather than parsing the
   `Verification:` line or `TaskOutcome.verification_state`) should pass
   this flag.
+- `--acceptance-checks JSON_OR_FILE` — optional, opt-in machine-checkable
+  acceptance criteria for this specific task, on top of (not instead of)
+  the project's own tests/build. See [Acceptance
+  checks](#acceptance-checks) below.
 
 The agent's final message is printed to stdout, followed by a
 `Verification: <state>` line (and any limitation notes under it) — see
@@ -129,11 +134,11 @@ The agent's final message is printed to stdout, followed by a
 is `1` on a configuration error, a run-time error (printed to stderr as
 `Configuration error: ...` / `Error: ...` — not a raw traceback), or a
 `retry_exhausted`/`no_progress`/`timed_out`/`incomplete`/`confirmation_required`/
-`budget_exhausted`/`stuck` verification outcome; `0` for `verified` and
-`inconclusive` (the latter
-isn't an error by default — nothing was proven broken — but it's still
-printed so it isn't mistaken for a confirmed pass; pass
-`--require-verification` to make it nonzero too).
+`budget_exhausted`/`acceptance_failed`/`stuck` verification outcome; `0`
+for `verified` and `inconclusive` (the latter isn't an error by default —
+nothing was proven broken — but it's still printed so it isn't mistaken
+for a confirmed pass; pass `--require-verification` to make it nonzero
+too).
 
 Examples:
 
@@ -232,7 +237,10 @@ in the same request), `model` / `api_key` / `base_url` / `reasoning_effort`
 `--reasoning-effort` — override `LLM_MODEL`/`LLM_API_KEY`/`LLM_BASE_URL`/
 `LLM_REASONING_EFFORT` for this request only, without touching `.env`),
 `require_verification` (optional, boolean, default `false` — same meaning
-as CLI `--require-verification`; see below).
+as CLI `--require-verification`; see below), `acceptance_checks` (optional,
+a JSON array of check objects, same shape and meaning as CLI
+`--acceptance-checks` — see [Acceptance checks](#acceptance-checks) below;
+unlike the CLI, this is always inline JSON, never a file path).
 Response (`202 Accepted`): `{"task_id": "...", "status":
 "..."}`. Config errors — including `agents_md` without `project` — are
 validated synchronously before a task is even created, so those still come
@@ -253,6 +261,7 @@ curl http://127.0.0.1:8000/tasks/f4fe313c-...
   "final_message": null,
   "verification_state": null,
   "completion_contract": null,
+  "acceptance_results": null,
   "messages": [],
   "error": null
 }
@@ -269,8 +278,9 @@ once `status == "completed"`; `error` is set once `status == "failed"`.
 exception — it is not proof the work is correct.** Check
 `verification_state` for that: one of `"verified"`, `"inconclusive"`,
 `"retry_exhausted"`, `"no_progress"`, `"timed_out"`, `"incomplete"`,
-`"confirmation_required"`, `"budget_exhausted"`, or `"stuck"` (see [Test
-verification](#test-verification) for what each means and when it's set),
+`"confirmation_required"`, `"budget_exhausted"`, `"acceptance_failed"`, or
+`"stuck"` (see [Test verification](#test-verification) for what each means
+and when it's set),
 populated once `status` reaches `"completed"` (or `"failed"` — see
 `require_verification` below). `completion_contract` is the structured
 record of what was actually checked: `{"goal", "acceptance_criteria",
@@ -297,9 +307,9 @@ accumulate them for now (see [Known limitations](#known-limitations)).
 ### `WS /tasks/stream` — live streaming, single connection
 
 Same inputs (including `model`/`api_key`/`base_url`/`reasoning_effort`/
-`require_verification`), sent as the first WebSocket message, but pushes
-each message to the client as the agent produces it, over the connection
-that's already open — no polling needed:
+`require_verification`/`acceptance_checks`), sent as the first WebSocket
+message, but pushes each message to the client as the agent produces it,
+over the connection that's already open — no polling needed:
 
 ```python
 import json
@@ -314,8 +324,9 @@ with connect("ws://127.0.0.1:8000/tasks/stream") as ws:
 Each frame is `{"type": "message", ...Message.model_dump()}`,
 `{"type": "error", "detail": "..."}`, or — the last frame before the socket
 closes on a successful run — `{"type": "result", "verification_state": ...,
-"completion_contract": {...}}`, the same terminal outcome `GET
-/tasks/{task_id}` exposes (see [Test verification](#test-verification)).
+"completion_contract": {...}, "acceptance_results": [...] | null}`, the
+same terminal outcome `GET /tasks/{task_id}` exposes (see [Test
+verification](#test-verification)).
 With `require_verification: true`, an `"inconclusive"` outcome sends
 `{"type": "error", "detail": "..."}` instead of a `"result"` frame — same
 `require_verification` semantics as `POST /tasks`, just expressed as which
@@ -977,6 +988,65 @@ elapsed time somewhat past the configured value before the next checkpoint
 catches it; this bounds runaway *retry multiplication*, not sub-second
 precision timing.
 
+## Acceptance checks
+
+`CompletionContract.acceptance_criteria` records what a task was expected
+to accomplish, but by itself it's never independently checked against
+anything — it's descriptive text, not a test. `--acceptance-checks` (CLI)
+/ `acceptance_checks` (`POST /tasks`, `WS /tasks/stream`) is an **optional,
+opt-in** way to give the harness something concrete to check for *this
+specific task*, on top of (not instead of) the project's own tests/build.
+
+A caller supplies a JSON array of check objects:
+
+```json
+[
+  {"kind": "file_exists", "path": "README.md"},
+  {
+    "kind": "file_contains",
+    "path": "README.md",
+    "contains": "## Usage",
+    "required": false,
+    "description": "README documents usage"
+  }
+]
+```
+
+- `kind` — `"file_exists"` or `"file_contains"` only. There is deliberately
+  no "run this command" kind, even though that was originally considered —
+  see [Known limitations](#known-limitations) for why.
+- `path` — always resolved relative to the task's own workspace, and
+  cannot escape it: an absolute path or a `..` segment is rejected
+  outright, and the resolved, symlink-followed location is checked against
+  the workspace the same way `resolve_project_dir()` protects
+  `HARNESS_PROJECTS_DIR` (see [Projects](#projects-one-subfolder-per-generated-project)).
+  Without this, an unauthenticated caller (server mode has no
+  authentication) could otherwise ask "does `/etc/passwd` contain `root`"
+  and learn about arbitrary host files.
+- `contains` — required for `"file_contains"`, ignored (and rejected) for
+  `"file_exists"`.
+- `required` — defaults to `true`. A failing **required** check downgrades
+  an otherwise-`"verified"` result to a new terminal state,
+  `"acceptance_failed"` — every other `verification_state` is left exactly
+  as it was, since a run that already failed some other way has nothing
+  left to "block". A failing **optional** check is still recorded (in
+  `limitations` and in the structured `acceptance_results`) but never
+  changes `verification_state`.
+- `description` — optional, human-readable label used in reports instead
+  of the raw `kind`/`path`.
+
+CLI: `--acceptance-checks` accepts either a path to a local JSON file or
+the JSON inline (same "existing file wins over literal text" resolution as
+the `task` argument itself, minus the URL-fetch case). Server mode always
+takes inline JSON (a request body field, not a file path).
+
+Every check is evaluated (a file read capped at 1MB for `file_contains`)
+regardless of the underlying verification outcome, and its result is
+attached to `TaskOutcome.acceptance_results` — exposed as
+`acceptance_results` in `GET /tasks/{task_id}` and the WS `"result"`
+frame — even when nothing was downgraded, so a caller can always see
+exactly what was checked and what was found.
+
 ## Testing
 
 ```bash
@@ -991,6 +1061,15 @@ uv run pytest -q
   resolves back inside it is allowed. Also covers `HARNESS_MAX_TASK_SECONDS`
   parsing (default, a custom value, and rejecting non-positive/non-integer
   values).
+- `tests/test_acceptance.py` — pure filesystem checks, no SDK, no network.
+  Input validation (`parse_acceptance_check`: unknown kind, missing/
+  invalid `path`, `file_contains` requiring `contains`, non-bool
+  `required`, non-object items), `file_exists`/`file_contains` evaluation
+  against real files in `tmp_path` (including a real capped-read
+  truncation case, not simulated), and the same path-containment
+  protection as `resolve_project_dir` — an absolute path, `..` traversal,
+  and a real on-disk symlink escape are all rejected, while a symlink that
+  stays inside the workspace is allowed.
 - `tests/test_skills.py` — `load_skill_catalog()` (against a temp directory
   with nested subfolders) and `write_project_context()`, no LLM.
 - `tests/custom_tools/test_*.py` — tool executors called directly, no LLM.
@@ -1028,9 +1107,12 @@ uv run pytest -q
   a directory outside `HARNESS_PROJECTS_DIR`, `--require-verification`
   (default off, an unknown project type/missing tool/no-tests-collected
   case all become exit `1` when passed, other verification states and the
-  default-off case are unaffected), and a regression test confirming
+  default-off case are unaffected), a regression test confirming
   `budget_exhausted` is a nonzero exit (verified live: reverting the fix
-  makes this test fail with `assert 0 == 1`).
+  makes this test fail with `assert 0 == 1`), and `resolve_acceptance_checks`/
+  `--acceptance-checks` (inline JSON, reading a file, rejecting invalid
+  JSON/a non-array/an invalid check kind, `acceptance_failed` being a
+  nonzero exit).
 - `tests/test_server.py` — REST/WebSocket/OpenAI-compatible routes via
   FastAPI's `TestClient` (SSE streaming read via `client.stream(...)` +
   `iter_lines()`); `load_config`/`run_task`/`stream_task` are monkeypatched,
@@ -1042,8 +1124,14 @@ uv run pytest -q
   `"failed"` with an explanatory `error` when set, unknown project type/
   missing tool/no-tests-collected all covered, other verification states
   unaffected) and `WS /tasks/stream` (sends a `"type": "error"` frame
-  instead of `"result"` in the same situation). Skips cleanly
-  (`pytest.importorskip("fastapi")`) when the `server` extra isn't installed.
+  instead of `"result"` in the same situation). Also covers
+  `acceptance_checks`: an invalid check returns `400` before a task is
+  created, a parsed list is passed through to `stream_task`, `None` when
+  omitted, and `GET /tasks/{task_id}`/the WS `"result"` frame both expose
+  `acceptance_results` (serialized via `asdict`, confirmed against a real
+  `AcceptanceCheckResult`/`AcceptanceCheck` pair, not a hand-built dict).
+  Skips cleanly (`pytest.importorskip("fastapi")`) when the `server` extra
+  isn't installed.
 - `tests/test_runner.py` — one real end-to-end smoke test (**skips cleanly**
   when `LLM_MODEL`/`LLM_API_KEY` aren't configured; when they are, it makes
   one real, cheap LLM call, asserts a file was actually created, and asserts
@@ -1091,10 +1179,33 @@ uv run pytest -q
   entirely. Confirmed live via the real CLI (`HARNESS_MAX_TASK_SECONDS=1`
   against a trivial task) that the task still completes its work but is
   correctly reported as `budget_exhausted` with exit code `1`, and that a
-  normal task under the default budget is unaffected.
+  normal task under the default budget is unaffected. `acceptance_checks`
+  coverage: `_apply_acceptance_checks` is a no-op with none supplied, all
+  checks passing keeps `"verified"`, a failing required check downgrades
+  `"verified"` to `"acceptance_failed"` (with a harness notice emitted), a
+  failing optional check is recorded but never downgrades, a non-`"verified"`
+  starting state is left alone (nothing left to "block"), and a rejected
+  path (e.g. absolute) fails cleanly as a result rather than raising —
+  plus two `stream_task`-level integration tests against a real filesystem
+  confirming a passing check keeps `"verified"` and a failing required one
+  downgrades a real `stream_task` run end to end.
 
 ## Known limitations
 
+- **Acceptance checks support only `file_exists`/`file_contains` — no
+  "run this command" kind, even though that was one of the kinds
+  originally proposed.** A caller-supplied command check would be a new,
+  harness-triggered remote-code-execution surface: the harness itself
+  would run whatever the caller specified, not the agent inside its own
+  tool loop — and that compounds directly with server mode having no
+  authentication (see the `POST /tasks`/`WS /tasks/stream` entry below):
+  an unauthenticated network caller could otherwise get arbitrary command
+  execution on the host with no agent, no confirm-mode gate, and no review
+  involved at all. A caller-supplied file *path* check doesn't have this
+  problem once properly contained to the task's own workspace (see
+  [Acceptance checks](#acceptance-checks)), so that's what's implemented;
+  a command kind is deliberately out of scope until server-mode
+  authentication exists, at minimum.
 - **`file_editor` requires absolute paths.** It does not resolve a relative
   path like `"HELLO.txt"` against the workspace directory — the model has to
   supply (or discover, e.g. via the terminal tool) a full absolute path.

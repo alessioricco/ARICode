@@ -83,7 +83,7 @@ def test_health():
 def test_create_task_returns_immediately_with_pending_status(monkeypatch):
     calls = {}
 
-    def _fake_stream_task(task, cfg=None, on_message=None):
+    def _fake_stream_task(task, cfg=None, on_message=None, acceptance_checks=None):
         calls["task"] = task
         calls["cfg"] = cfg
         on_message(_FakeMessage("assistant", "all done"))
@@ -112,7 +112,7 @@ def test_create_task_returns_immediately_with_pending_status(monkeypatch):
 def test_create_task_with_project_creates_subfolder(monkeypatch, tmp_path):
     calls = {}
 
-    def _fake_stream_task(task, cfg=None, on_message=None):
+    def _fake_stream_task(task, cfg=None, on_message=None, acceptance_checks=None):
         calls["cfg"] = cfg
         return _fake_outcome()
 
@@ -154,7 +154,7 @@ def test_create_task_agents_md_without_project_returns_400(monkeypatch):
 
 
 def test_create_task_agents_md_with_project_writes_file(monkeypatch, tmp_path):
-    def _fake_stream_task(task, cfg=None, on_message=None):
+    def _fake_stream_task(task, cfg=None, on_message=None, acceptance_checks=None):
         return _fake_outcome()
 
     monkeypatch.setattr(server, "load_config", lambda: _cfg(projects_dir=str(tmp_path)))
@@ -177,7 +177,7 @@ def test_create_task_agents_md_with_project_writes_file(monkeypatch, tmp_path):
 def test_create_task_with_model_override_swaps_llm_without_env(monkeypatch):
     calls = {}
 
-    def _fake_stream_task(task, cfg=None, on_message=None):
+    def _fake_stream_task(task, cfg=None, on_message=None, acceptance_checks=None):
         calls["cfg"] = cfg
         return _fake_outcome()
 
@@ -204,7 +204,7 @@ def test_create_task_with_model_override_swaps_llm_without_env(monkeypatch):
 def test_create_task_with_reasoning_effort_override(monkeypatch):
     calls = {}
 
-    def _fake_stream_task(task, cfg=None, on_message=None):
+    def _fake_stream_task(task, cfg=None, on_message=None, acceptance_checks=None):
         calls["cfg"] = cfg
         return _fake_outcome()
 
@@ -225,7 +225,7 @@ def test_create_task_with_reasoning_effort_override(monkeypatch):
 def test_create_task_without_override_keeps_configured_model(monkeypatch):
     calls = {}
 
-    def _fake_stream_task(task, cfg=None, on_message=None):
+    def _fake_stream_task(task, cfg=None, on_message=None, acceptance_checks=None):
         calls["cfg"] = cfg
         return _fake_outcome()
 
@@ -253,7 +253,7 @@ def test_create_task_config_error_returns_400_immediately(monkeypatch):
 
 
 def test_get_task_reports_failure(monkeypatch):
-    def _fake_stream_task(task, cfg=None, on_message=None):
+    def _fake_stream_task(task, cfg=None, on_message=None, acceptance_checks=None):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(server, "load_config", lambda: _cfg())
@@ -274,7 +274,7 @@ def test_get_task_status_completed_does_not_imply_verification_passed(monkeypatc
     # "completed" (no exception), so a poller must check
     # `verification_state`, not just `status`, to know whether it actually
     # succeeded. See MANUAL.md "Test verification".
-    def _fake_stream_task(task, cfg=None, on_message=None):
+    def _fake_stream_task(task, cfg=None, on_message=None, acceptance_checks=None):
         return _fake_outcome(verification_state="retry_exhausted", limitations=["pytest: 2 failed"])
 
     monkeypatch.setattr(server, "load_config", lambda: _cfg())
@@ -294,7 +294,7 @@ def test_get_task_status_completed_does_not_imply_verification_passed(monkeypatc
 
 
 def test_create_task_inconclusive_defaults_to_completed_status(monkeypatch):
-    def _fake_stream_task(task, cfg=None, on_message=None):
+    def _fake_stream_task(task, cfg=None, on_message=None, acceptance_checks=None):
         return _fake_outcome(
             verification_state="inconclusive",
             limitations=["No automated check could be run for this project."],
@@ -313,7 +313,7 @@ def test_create_task_inconclusive_defaults_to_completed_status(monkeypatch):
 
 
 def test_create_task_require_verification_turns_unknown_project_into_failure(monkeypatch):
-    def _fake_stream_task(task, cfg=None, on_message=None):
+    def _fake_stream_task(task, cfg=None, on_message=None, acceptance_checks=None):
         return _fake_outcome(
             verification_state="inconclusive",
             limitations=["No automated check could be run for this project."],
@@ -335,7 +335,7 @@ def test_create_task_require_verification_turns_unknown_project_into_failure(mon
 
 
 def test_create_task_require_verification_turns_a_missing_tool_into_failure(monkeypatch):
-    def _fake_stream_task(task, cfg=None, on_message=None):
+    def _fake_stream_task(task, cfg=None, on_message=None, acceptance_checks=None):
         return _fake_outcome(
             verification_state="inconclusive",
             limitations=["npm is required to verify this project but was not found on PATH."],
@@ -358,7 +358,7 @@ def test_create_task_require_verification_turns_no_tests_collected_into_failure(
     # The quiet "pytest collected zero tests" case is still just
     # "inconclusive" from the caller's point of view — require_verification
     # doesn't special-case it.
-    def _fake_stream_task(task, cfg=None, on_message=None):
+    def _fake_stream_task(task, cfg=None, on_message=None, acceptance_checks=None):
         return _fake_outcome(verification_state="inconclusive", limitations=[])
 
     monkeypatch.setattr(server, "load_config", lambda: _cfg())
@@ -375,7 +375,7 @@ def test_create_task_require_verification_turns_no_tests_collected_into_failure(
 
 
 def test_create_task_require_verification_does_not_affect_a_real_verified_pass(monkeypatch):
-    def _fake_stream_task(task, cfg=None, on_message=None):
+    def _fake_stream_task(task, cfg=None, on_message=None, acceptance_checks=None):
         return _fake_outcome(verification_state="verified")
 
     monkeypatch.setattr(server, "load_config", lambda: _cfg())
@@ -396,7 +396,7 @@ def test_create_task_require_verification_does_not_change_other_verification_sta
     # verification_state keeps its existing status semantics unchanged
     # ("completed" means the run didn't raise, never "verification passed";
     # see test_get_task_status_completed_does_not_imply_verification_passed).
-    def _fake_stream_task(task, cfg=None, on_message=None):
+    def _fake_stream_task(task, cfg=None, on_message=None, acceptance_checks=None):
         return _fake_outcome(verification_state="retry_exhausted", limitations=["pytest: 2 failed"])
 
     monkeypatch.setattr(server, "load_config", lambda: _cfg())
@@ -415,7 +415,7 @@ def test_create_task_require_verification_does_not_change_other_verification_sta
 
 
 def test_stream_task_require_verification_sends_error_event_for_inconclusive(monkeypatch):
-    def _fake_stream_task(task, cfg=None, on_message=None):
+    def _fake_stream_task(task, cfg=None, on_message=None, acceptance_checks=None):
         on_message(_FakeMessage("assistant", "done"))
         return _fake_outcome(
             verification_state="inconclusive",
@@ -435,6 +435,156 @@ def test_stream_task_require_verification_sends_error_event_for_inconclusive(mon
     assert "No automated check could be run" in result["detail"]
 
 
+# --- acceptance_checks: opt-in machine-checkable acceptance criteria -------
+
+
+def test_create_task_rejects_invalid_acceptance_checks(monkeypatch):
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("stream_task should not be called")
+
+    monkeypatch.setattr(server, "load_config", lambda: _cfg())
+    monkeypatch.setattr(server, "stream_task", _fail_if_called)
+
+    client = TestClient(server.create_app())
+    response = client.post(
+        "/tasks",
+        json={
+            "task": "do something",
+            "acceptance_checks": [{"kind": "run_command", "path": "x"}],
+        },
+    )
+
+    assert response.status_code == 400
+    assert "Unknown acceptance check kind" in response.json()["detail"]
+
+
+def test_create_task_passes_parsed_acceptance_checks_to_stream_task(monkeypatch):
+    calls = {}
+
+    def _fake_stream_task(task, cfg=None, on_message=None, acceptance_checks=None):
+        calls["acceptance_checks"] = acceptance_checks
+        return _fake_outcome()
+
+    monkeypatch.setattr(server, "load_config", lambda: _cfg())
+    monkeypatch.setattr(server, "stream_task", _fake_stream_task)
+
+    client = TestClient(server.create_app())
+    task_id = client.post(
+        "/tasks",
+        json={
+            "task": "do something",
+            "acceptance_checks": [{"kind": "file_exists", "path": "OUTPUT.txt"}],
+        },
+    ).json()["task_id"]
+    _wait_for_status(client, task_id)
+
+    assert calls["acceptance_checks"][0].path == "OUTPUT.txt"
+
+
+def test_create_task_without_acceptance_checks_passes_none(monkeypatch):
+    calls = {}
+
+    def _fake_stream_task(task, cfg=None, on_message=None, acceptance_checks=None):
+        calls["acceptance_checks"] = acceptance_checks
+        return _fake_outcome()
+
+    monkeypatch.setattr(server, "load_config", lambda: _cfg())
+    monkeypatch.setattr(server, "stream_task", _fake_stream_task)
+
+    client = TestClient(server.create_app())
+    task_id = client.post("/tasks", json={"task": "do something"}).json()["task_id"]
+    _wait_for_status(client, task_id)
+
+    assert calls["acceptance_checks"] is None
+
+
+def test_get_task_exposes_acceptance_results(monkeypatch):
+    from harness.acceptance import AcceptanceCheck, AcceptanceCheckResult
+
+    def _fake_stream_task(task, cfg=None, on_message=None, acceptance_checks=None):
+        contract = CompletionContract(
+            goal="do something", acceptance_criteria=[], verification_checks=[], limitations=[]
+        )
+        return TaskOutcome(
+            verification_state="verified",
+            completion_contract=contract,
+            acceptance_results=(
+                AcceptanceCheckResult(
+                    check=AcceptanceCheck(kind="file_exists", path="OUTPUT.txt"),
+                    passed=True,
+                    detail="OUTPUT.txt exists",
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(server, "load_config", lambda: _cfg())
+    monkeypatch.setattr(server, "stream_task", _fake_stream_task)
+
+    client = TestClient(server.create_app())
+    task_id = client.post("/tasks", json={"task": "do something"}).json()["task_id"]
+    final = _wait_for_status(client, task_id)
+
+    assert final["acceptance_results"] == [
+        {
+            "check": {
+                "kind": "file_exists",
+                "path": "OUTPUT.txt",
+                "contains": None,
+                "required": True,
+                "description": None,
+            },
+            "passed": True,
+            "detail": "OUTPUT.txt exists",
+        }
+    ]
+
+
+def test_get_task_acceptance_results_is_none_when_not_supplied(monkeypatch):
+    def _fake_stream_task(task, cfg=None, on_message=None, acceptance_checks=None):
+        return _fake_outcome()
+
+    monkeypatch.setattr(server, "load_config", lambda: _cfg())
+    monkeypatch.setattr(server, "stream_task", _fake_stream_task)
+
+    client = TestClient(server.create_app())
+    task_id = client.post("/tasks", json={"task": "do something"}).json()["task_id"]
+    final = _wait_for_status(client, task_id)
+
+    assert final["acceptance_results"] is None
+
+
+def test_stream_task_result_event_includes_acceptance_results(monkeypatch):
+    from harness.acceptance import AcceptanceCheck, AcceptanceCheckResult
+
+    def _fake_stream_task(task, cfg=None, on_message=None, acceptance_checks=None):
+        contract = CompletionContract(
+            goal="do something", acceptance_criteria=[], verification_checks=[], limitations=[]
+        )
+        return TaskOutcome(
+            verification_state="acceptance_failed",
+            completion_contract=contract,
+            acceptance_results=(
+                AcceptanceCheckResult(
+                    check=AcceptanceCheck(kind="file_exists", path="OUTPUT.txt"),
+                    passed=False,
+                    detail="OUTPUT.txt does not exist",
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(server, "load_config", lambda: _cfg())
+    monkeypatch.setattr(server, "stream_task", _fake_stream_task)
+
+    client = TestClient(server.create_app())
+    with client.websocket_connect("/tasks/stream") as ws:
+        ws.send_json({"task": "do something"})
+        result = ws.receive_json()
+
+    assert result["type"] == "result"
+    assert result["verification_state"] == "acceptance_failed"
+    assert result["acceptance_results"][0]["passed"] is False
+
+
 def test_get_task_unknown_id_returns_404():
     client = TestClient(server.create_app())
 
@@ -447,7 +597,7 @@ def test_get_task_reflects_partial_progress(monkeypatch):
     started = threading.Event()
     finish = threading.Event()
 
-    def _fake_stream_task(task, cfg=None, on_message=None):
+    def _fake_stream_task(task, cfg=None, on_message=None, acceptance_checks=None):
         on_message(_FakeMessage("assistant", "step one"))
         started.set()
         finish.wait(timeout=2)
@@ -471,7 +621,7 @@ def test_get_task_reflects_partial_progress(monkeypatch):
 
 
 def test_stream_task_sends_messages_then_closes(monkeypatch):
-    def _fake_stream_task(task, cfg=None, on_message=None):
+    def _fake_stream_task(task, cfg=None, on_message=None, acceptance_checks=None):
         on_message(_FakeMessage("assistant", "step one"))
         on_message(_FakeMessage("assistant", "done"))
         return _fake_outcome()
@@ -491,7 +641,7 @@ def test_stream_task_sends_messages_then_closes(monkeypatch):
 
 
 def test_stream_task_sends_a_final_result_event_with_verification_state(monkeypatch):
-    def _fake_stream_task(task, cfg=None, on_message=None):
+    def _fake_stream_task(task, cfg=None, on_message=None, acceptance_checks=None):
         on_message(_FakeMessage("assistant", "done"))
         return _fake_outcome(verification_state="retry_exhausted", limitations=["pytest: 2 failed"])
 
@@ -512,7 +662,7 @@ def test_stream_task_sends_a_final_result_event_with_verification_state(monkeypa
 def test_stream_task_with_model_override_swaps_llm(monkeypatch):
     calls = {}
 
-    def _fake_stream_task(task, cfg=None, on_message=None):
+    def _fake_stream_task(task, cfg=None, on_message=None, acceptance_checks=None):
         calls["cfg"] = cfg
         on_message(_FakeMessage("assistant", "done"))
         return _fake_outcome()
@@ -739,7 +889,7 @@ def test_chat_completions_config_error_returns_400(monkeypatch):
 
 
 def test_chat_completions_streaming_sends_sse_chunks(monkeypatch):
-    def _fake_stream_task(task, cfg=None, on_message=None):
+    def _fake_stream_task(task, cfg=None, on_message=None, acceptance_checks=None):
         on_message(_FakeMessage("user", "echoed task, should not stream"))
         on_message(_FakeMessage("assistant", "step one"))
         # The real "finish" text arrives as a tool-role message (confirmed

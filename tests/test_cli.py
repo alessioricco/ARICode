@@ -107,7 +107,7 @@ def test_main_reads_task_from_file(monkeypatch, tmp_path, capsys):
     task_file.write_text("Create HELLO.txt with the line: hi.")
     calls = {}
 
-    def _fake_run_task(task, cfg=None, on_confirm=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
         calls["task"] = task
         return _fake_result([_FakeMessage("done")])
 
@@ -151,7 +151,7 @@ def test_config_error_is_reported_and_exits_nonzero(monkeypatch, capsys):
 def test_docker_execution_is_passed_through_to_run_task(monkeypatch):
     calls = {}
 
-    def _fake_run_task(task, cfg=None, on_confirm=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
         calls["cfg"] = cfg
         return _fake_result()
 
@@ -165,7 +165,7 @@ def test_docker_execution_is_passed_through_to_run_task(monkeypatch):
 
 
 def test_run_task_error_is_reported_and_exits_nonzero(monkeypatch, capsys):
-    def _fake_run_task(task, cfg=None, on_confirm=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
         raise RuntimeError("HARNESS_EXECUTION=docker requires the 'sandbox' extra")
 
     monkeypatch.setattr(cli, "load_config", lambda: _cfg())
@@ -180,7 +180,7 @@ def test_run_task_error_is_reported_and_exits_nonzero(monkeypatch, capsys):
 def test_project_flag_creates_subfolder_and_overrides_workspace(monkeypatch, tmp_path):
     calls = {}
 
-    def _fake_run_task(task, cfg=None, on_confirm=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
         calls["cfg"] = cfg
         return _fake_result()
 
@@ -212,7 +212,7 @@ def test_project_flag_rejects_a_path_escape_attempt(monkeypatch, tmp_path, capsy
 def test_local_execution_runs_task_and_prints_final_message(monkeypatch, capsys):
     calls = {}
 
-    def _fake_run_task(task, cfg=None, on_confirm=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
         calls["task"] = task
         calls["cfg"] = cfg
         return _fake_result([_FakeMessage("all done")])
@@ -242,7 +242,7 @@ def test_agents_md_without_project_is_rejected(monkeypatch, capsys):
 
 
 def test_agents_md_with_project_writes_file(monkeypatch, tmp_path):
-    def _fake_run_task(task, cfg=None, on_confirm=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
         return _fake_result()
 
     monkeypatch.setattr(cli, "load_config", lambda: _cfg(projects_dir=str(tmp_path)))
@@ -259,7 +259,7 @@ def test_agents_md_with_project_writes_file(monkeypatch, tmp_path):
 def test_model_flag_overrides_llm_model_without_touching_env(monkeypatch):
     calls = {}
 
-    def _fake_run_task(task, cfg=None, on_confirm=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
         calls["cfg"] = cfg
         return _fake_result()
 
@@ -277,7 +277,7 @@ def test_model_flag_overrides_llm_model_without_touching_env(monkeypatch):
 def test_api_key_and_base_url_flags_override_config(monkeypatch):
     calls = {}
 
-    def _fake_run_task(task, cfg=None, on_confirm=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
         calls["cfg"] = cfg
         return _fake_result()
 
@@ -302,7 +302,7 @@ def test_api_key_and_base_url_flags_override_config(monkeypatch):
 def test_no_llm_override_flags_leaves_config_untouched(monkeypatch):
     calls = {}
 
-    def _fake_run_task(task, cfg=None, on_confirm=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
         calls["cfg"] = cfg
         return _fake_result()
 
@@ -319,7 +319,7 @@ def test_no_llm_override_flags_leaves_config_untouched(monkeypatch):
 def test_reasoning_effort_flag_overrides_config(monkeypatch):
     calls = {}
 
-    def _fake_run_task(task, cfg=None, on_confirm=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
         calls["cfg"] = cfg
         return _fake_result()
 
@@ -348,7 +348,7 @@ def test_blank_model_override_reports_config_error(monkeypatch, capsys):
 
 
 def test_prints_verification_state_and_exits_zero_when_verified(monkeypatch, capsys):
-    def _fake_run_task(task, cfg=None, on_confirm=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
         return _fake_result([_FakeMessage("all done")], verification_state="verified")
 
     monkeypatch.setattr(cli, "load_config", lambda: _cfg())
@@ -361,7 +361,7 @@ def test_prints_verification_state_and_exits_zero_when_verified(monkeypatch, cap
 
 
 def test_exits_nonzero_when_verification_retries_are_exhausted(monkeypatch, capsys):
-    def _fake_run_task(task, cfg=None, on_confirm=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
         return _fake_result(
             [_FakeMessage("I gave up")],
             verification_state="retry_exhausted",
@@ -380,7 +380,7 @@ def test_exits_nonzero_when_verification_retries_are_exhausted(monkeypatch, caps
 
 
 def test_exits_nonzero_when_verification_keeps_timing_out(monkeypatch, capsys):
-    def _fake_run_task(task, cfg=None, on_confirm=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
         return _fake_result(
             [_FakeMessage("still going")],
             verification_state="timed_out",
@@ -398,7 +398,7 @@ def test_exits_nonzero_when_verification_keeps_timing_out(monkeypatch, capsys):
 
 
 def test_exits_nonzero_when_a_fix_attempt_made_no_progress(monkeypatch, capsys):
-    def _fake_run_task(task, cfg=None, on_confirm=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
         return _fake_result([_FakeMessage("tried a fix")], verification_state="no_progress")
 
     monkeypatch.setattr(cli, "load_config", lambda: _cfg())
@@ -412,7 +412,7 @@ def test_exits_nonzero_when_a_fix_attempt_made_no_progress(monkeypatch, capsys):
 
 
 def test_exits_nonzero_when_task_tracker_left_incomplete(monkeypatch, capsys):
-    def _fake_run_task(task, cfg=None, on_confirm=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
         return _fake_result(
             [_FakeMessage("finished")],
             verification_state="incomplete",
@@ -430,7 +430,7 @@ def test_exits_nonzero_when_task_tracker_left_incomplete(monkeypatch, capsys):
 
 
 def test_exits_nonzero_when_agent_got_stuck(monkeypatch, capsys):
-    def _fake_run_task(task, cfg=None, on_confirm=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
         return _fake_result([], verification_state="stuck")
 
     monkeypatch.setattr(cli, "load_config", lambda: _cfg())
@@ -443,7 +443,7 @@ def test_exits_nonzero_when_agent_got_stuck(monkeypatch, capsys):
 
 
 def test_exits_nonzero_when_task_budget_is_exhausted(monkeypatch, capsys):
-    def _fake_run_task(task, cfg=None, on_confirm=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
         return _fake_result(
             [_FakeMessage("ran out of time")],
             verification_state="budget_exhausted",
@@ -470,7 +470,7 @@ def test_exits_nonzero_when_task_budget_is_exhausted(monkeypatch, capsys):
 def test_inconclusive_verification_still_exits_zero_but_is_visible(monkeypatch, capsys):
     # Inconclusive isn't an error (nothing was proven broken), but it must
     # not look like a silent, confirmed success either.
-    def _fake_run_task(task, cfg=None, on_confirm=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
         return _fake_result(
             [_FakeMessage("done, probably")],
             verification_state="inconclusive",
@@ -494,7 +494,7 @@ def test_inconclusive_verification_still_exits_zero_but_is_visible(monkeypatch, 
 def test_require_verification_flag_defaults_to_off(monkeypatch):
     calls = {}
 
-    def _fake_run_task(task, cfg=None, on_confirm=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
         calls["called"] = True
         return _fake_result(verification_state="inconclusive")
 
@@ -508,7 +508,7 @@ def test_require_verification_flag_defaults_to_off(monkeypatch):
 
 
 def test_require_verification_flag_makes_unknown_project_type_a_failure(monkeypatch, capsys):
-    def _fake_run_task(task, cfg=None, on_confirm=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
         return _fake_result(
             verification_state="inconclusive",
             limitations=["No automated check could be run for this project."],
@@ -524,7 +524,7 @@ def test_require_verification_flag_makes_unknown_project_type_a_failure(monkeypa
 
 
 def test_require_verification_flag_makes_a_missing_tool_a_failure(monkeypatch):
-    def _fake_run_task(task, cfg=None, on_confirm=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
         return _fake_result(
             verification_state="inconclusive",
             limitations=["npm is required to verify this project but was not found on PATH."],
@@ -543,7 +543,7 @@ def test_require_verification_flag_makes_no_tests_collected_a_failure(monkeypatc
     # case is still just "inconclusive" — --require-verification doesn't
     # special-case it, since the whole point of opting in is "no evidence
     # is not good enough," regardless of which specific reason produced it.
-    def _fake_run_task(task, cfg=None, on_confirm=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
         return _fake_result(verification_state="inconclusive", limitations=[])
 
     monkeypatch.setattr(cli, "load_config", lambda: _cfg())
@@ -555,7 +555,7 @@ def test_require_verification_flag_makes_no_tests_collected_a_failure(monkeypatc
 
 
 def test_require_verification_flag_does_not_affect_a_real_verified_pass(monkeypatch):
-    def _fake_run_task(task, cfg=None, on_confirm=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
         return _fake_result(verification_state="verified")
 
     monkeypatch.setattr(cli, "load_config", lambda: _cfg())
@@ -567,7 +567,7 @@ def test_require_verification_flag_does_not_affect_a_real_verified_pass(monkeypa
 
 
 def test_require_verification_flag_does_not_change_other_failure_states(monkeypatch):
-    def _fake_run_task(task, cfg=None, on_confirm=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
         return _fake_result(verification_state="retry_exhausted")
 
     monkeypatch.setattr(cli, "load_config", lambda: _cfg())
@@ -581,7 +581,7 @@ def test_require_verification_flag_does_not_change_other_failure_states(monkeypa
 def test_execution_flag_overrides_configured_docker_default(monkeypatch):
     calls = {}
 
-    def _fake_run_task(task, cfg=None, on_confirm=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
         calls["cfg"] = cfg
         return _fake_result()
 
@@ -598,7 +598,7 @@ def test_execution_flag_overrides_configured_docker_default(monkeypatch):
 
 
 def test_exits_nonzero_when_confirmation_required_with_no_handler(monkeypatch, capsys):
-    def _fake_run_task(task, cfg=None, on_confirm=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
         return _fake_result(
             [_FakeMessage("stopped")],
             verification_state="confirmation_required",
@@ -618,7 +618,7 @@ def test_exits_nonzero_when_confirmation_required_with_no_handler(monkeypatch, c
 def test_confirm_mode_never_passes_no_confirm_handler_to_run_task(monkeypatch):
     calls = {}
 
-    def _fake_run_task(task, cfg=None, on_confirm=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
         calls["on_confirm"] = on_confirm
         return _fake_result()
 
@@ -633,7 +633,7 @@ def test_confirm_mode_never_passes_no_confirm_handler_to_run_task(monkeypatch):
 def test_confirm_mode_always_passes_the_interactive_handler_to_run_task(monkeypatch):
     calls = {}
 
-    def _fake_run_task(task, cfg=None, on_confirm=None):
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
         calls["on_confirm"] = on_confirm
         return _fake_result()
 
@@ -659,3 +659,108 @@ def test_confirm_pending_actions_approves_only_on_explicit_yes(monkeypatch):
     for reply in ("n", "no", "", "sure", "YOLO"):
         monkeypatch.setattr("builtins.input", lambda _prompt, reply=reply: reply)
         assert cli._confirm_pending_actions(pending) is False
+
+
+# --- --acceptance-checks: opt-in machine-checkable acceptance criteria ------
+
+
+def test_resolve_acceptance_checks_parses_inline_json():
+    checks = cli.resolve_acceptance_checks('[{"kind": "file_exists", "path": "README.md"}]')
+
+    assert len(checks) == 1
+    assert checks[0].kind == "file_exists"
+    assert checks[0].path == "README.md"
+
+
+def test_resolve_acceptance_checks_reads_a_file(tmp_path):
+    checks_file = tmp_path / "checks.json"
+    checks_file.write_text('[{"kind": "file_exists", "path": "OUTPUT.txt"}]')
+
+    checks = cli.resolve_acceptance_checks(str(checks_file))
+
+    assert checks[0].path == "OUTPUT.txt"
+
+
+def test_resolve_acceptance_checks_rejects_invalid_json():
+    with pytest.raises(ValueError, match="must be valid JSON"):
+        cli.resolve_acceptance_checks("not json")
+
+
+def test_resolve_acceptance_checks_rejects_a_non_array():
+    with pytest.raises(ValueError, match="must be a JSON array"):
+        cli.resolve_acceptance_checks('{"kind": "file_exists", "path": "x"}')
+
+
+def test_resolve_acceptance_checks_rejects_an_invalid_check():
+    with pytest.raises(ValueError, match="Unknown acceptance check kind"):
+        cli.resolve_acceptance_checks('[{"kind": "run_command", "path": "x"}]')
+
+
+def test_main_rejects_bad_acceptance_checks_json(monkeypatch, capsys):
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("run_task should not be called")
+
+    monkeypatch.setattr(cli, "load_config", lambda: _cfg())
+    monkeypatch.setattr(cli, "run_task", _fail_if_called)
+
+    exit_code = cli.main(["do something", "--acceptance-checks", "not json"])
+
+    assert exit_code == 1
+    assert "Configuration error" in capsys.readouterr().err
+
+
+def test_main_passes_parsed_acceptance_checks_to_run_task(monkeypatch):
+    calls = {}
+
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
+        calls["acceptance_checks"] = acceptance_checks
+        return _fake_result()
+
+    monkeypatch.setattr(cli, "load_config", lambda: _cfg())
+    monkeypatch.setattr(cli, "run_task", _fake_run_task)
+
+    exit_code = cli.main(
+        [
+            "do something",
+            "--acceptance-checks",
+            '[{"kind": "file_exists", "path": "OUTPUT.txt"}]',
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls["acceptance_checks"][0].path == "OUTPUT.txt"
+
+
+def test_main_without_acceptance_checks_flag_passes_none(monkeypatch):
+    calls = {}
+
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
+        calls["acceptance_checks"] = acceptance_checks
+        return _fake_result()
+
+    monkeypatch.setattr(cli, "load_config", lambda: _cfg())
+    monkeypatch.setattr(cli, "run_task", _fake_run_task)
+
+    cli.main(["do something"])
+
+    assert calls["acceptance_checks"] is None
+
+
+def test_exits_nonzero_when_acceptance_check_failed(monkeypatch, capsys):
+    def _fake_run_task(task, cfg=None, on_confirm=None, acceptance_checks=None):
+        return _fake_result(
+            [_FakeMessage("done, I think")],
+            verification_state="acceptance_failed",
+            limitations=[
+                "Required acceptance check failed (OUTPUT.txt): OUTPUT.txt does not exist"
+            ],
+        )
+
+    monkeypatch.setattr(cli, "load_config", lambda: _cfg())
+    monkeypatch.setattr(cli, "run_task", _fake_run_task)
+
+    exit_code = cli.main(["do something"])
+
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "Verification: acceptance_failed" in out
