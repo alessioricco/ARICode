@@ -228,5 +228,13 @@ private/
 secrets/
 models.yaml
 
+# Third-party skill content (Apache-2.0, from github.com/anthropics/skills) —
+# not this project's own IP, kept locally but not redistributed from this
+# repo. This project's own skills/ subdirectories (lifecycle/, git/,
+# python-web/, testing/) are NOT excluded — only these three.
+/skills/frontend-design/
+/skills/webapp-testing/
+/skills/web-artifacts-builder/
+
 # Claude Code personal overrides
 .claude/settings.local.json

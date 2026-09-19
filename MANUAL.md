@@ -834,11 +834,17 @@ as a starting point: `skills/testing/pytest-conventions.md`,
 `pyproject.toml`/`requirements*.txt`, not on task text). Add more the same
 way; no registration step beyond dropping the file in `skills/`.
 
-It also ships three `SKILL.md`-format skills sourced from
-[anthropics/skills](https://github.com/anthropics/skills) (MIT-licensed):
-`skills/frontend-design/`, `skills/webapp-testing/`, and
-`skills/web-artifacts-builder/` — model-invoked as described above, one
-level deep per the AgentSkills depth caveat.
+Three more `SKILL.md`-format skills are **not shipped in this repo**:
+`frontend-design`, `webapp-testing`, and `web-artifacts-builder`, sourced
+from [anthropics/skills](https://github.com/anthropics/skills). They're
+genuinely third-party (each carries its own **Apache-2.0** `LICENSE.txt` —
+not MIT), so they're excluded here rather than redistributed under this
+repo's own MIT license; `.gitignore` deliberately keeps them out even if a
+local copy exists on disk. If you want them, download them yourself from
+that repo into `skills/frontend-design/`, `skills/webapp-testing/`, and
+`skills/web-artifacts-builder/` — `load_skill_catalog()` picks up whatever
+it finds there with no registration step, model-invoked as described
+above, one level deep per the AgentSkills depth caveat.
 
 ### Lifecycle skills (`skills/lifecycle/`)
 

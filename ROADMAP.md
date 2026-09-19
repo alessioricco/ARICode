@@ -2354,3 +2354,39 @@ build plan. This file is the living, evolving companion to that static plan.
   still firing when one of the two duplicates is deactivated, and
   `rank_candidates()` both excluding a higher-scoring deactivated entry
   and raising when every entry is deactivated.
+- **Excluded the three third-party `SKILL.md` directories
+  (`frontend-design`/`webapp-testing`/`web-artifacts-builder`) from the
+  repo — `.gitignore` + untrack, not deleted — after user request to stop
+  redistributing "files that belong to other projects."** Checking each
+  directory directly (not from memory/prior summary) found a real
+  documentation error in the same change: MANUAL.md's "Skills" section
+  claimed these three were "MIT-licensed," but each one actually carries
+  its own `LICENSE.txt` containing the full **Apache-2.0** license text —
+  a materially different set of redistribution obligations (retaining
+  copyright/license/attribution notices, reproducing any NOTICE file) than
+  MIT's single-notice requirement. Fixed the claim in the same change.
+  - **Scope: only the 3 directories with their own `LICENSE.txt`, not all
+    of `skills/`** — confirmed by checking which subdirectories actually
+    carry one (`frontend-design`, `webapp-testing`, `web-artifacts-builder`)
+    versus which don't (`lifecycle/`, `git/`, `python-web/`, `testing/`,
+    all authored specifically for this project per the "Lifecycle skills"
+    and "SDLC skills" decisions-log entries above, and already covered by
+    this repo's own MIT license like any other source file here). An
+    earlier, broader `skills/` `.gitignore` line (added directly by the
+    user, not through a request I'd seen) would have also stopped tracking
+    the project's own original skill content — narrowed to the 3 specific
+    paths instead.
+  - **Untracked (`git rm --cached`), not deleted from disk** — same
+    treatment this repo already gives `.env`/`models.yaml`/`projects/`:
+    kept locally so the harness keeps working today without a re-download,
+    but no longer part of what a fresh clone or `git push` carries. A
+    fresh clone missing these three is not a broken state:
+    `load_skill_catalog()` is a directory scan with no special-casing for
+    any specific skill name (confirmed by grepping `src/` — no code
+    references these three names at all, only docs) — verified live by
+    loading a catalog directory containing only the four
+    project-authored categories: 12 skills load cleanly, versus 15 with
+    all three present, no error either way.
+  - MANUAL.md's "Skills" section now says plainly that these three aren't
+    shipped and points at `github.com/anthropics/skills` for anyone who
+    wants to add them back locally themselves.
