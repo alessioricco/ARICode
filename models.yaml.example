@@ -53,8 +53,11 @@
 # them: set it to `false` and rank_candidates() skips that model entirely
 # (not scored, never picked, never a fallback) — the entry stays in the
 # file, still validated, still counted for duplicate-name checks. Every
-# model in this template is `activated: true`; set a few to `false` to
-# match the providers/keys you actually have.
+# model in this template starts as `activated: false` — this file will not
+# select anything until you flip at least one to `true` (a copied-but-
+# unconfigured models.yaml fails loudly with a clear error instead of
+# silently running whatever happened to rank first). Activate only the
+# models whose provider/key you've actually filled in above.
 
 models:
   # ---------------------------------------------------------------------------
@@ -72,7 +75,7 @@ models:
       refactors where correctness beats speed. Most expensive per token,
       so it's overkill for routine work.
     ratings: {reasoning: 5, cost: 1, precision: 5, code: 5}
-    activated: true
+    activated: false
 
   - name: claude-sonnet-5
     model: anthropic/claude-sonnet-5
@@ -84,7 +87,7 @@ models:
       at a much friendlier price and latency. Good first choice for most
       tasks; only escalate to Opus 5 when it visibly struggles.
     ratings: {reasoning: 4, cost: 3, precision: 4, code: 5}
-    activated: true
+    activated: false
 
   - name: claude-haiku
     model: anthropic/claude-haiku-4-5-20251001
@@ -97,7 +100,7 @@ models:
       codebases — expect it to fall through to a better-rated model on
       anything complex.
     ratings: {reasoning: 3, cost: 4, precision: 3, code: 3}
-    activated: true
+    activated: false
 
   - name: claude-opus-4-8
     model: anthropic/claude-opus-4-8
@@ -110,7 +113,7 @@ models:
       limited, this is the closest drop-in for high-reasoning, high-code
       tasks. Priced in the same premium tier as Opus 5.
     ratings: {reasoning: 5, cost: 1, precision: 4, code: 4}
-    activated: true
+    activated: false
 
   # ---------------------------------------------------------------------------
   # OPENAI — FRONTIER / MAXIMUM QUALITY
@@ -127,7 +130,7 @@ models:
       execution, and difficult knowledge work matter more than cost or
       latency.
     ratings: {reasoning: 5, cost: 1, precision: 5, code: 5}
-    activated: true
+    activated: false
 
   - name: gpt-5.6-sol
     model: openai/gpt-5.6-sol
@@ -139,7 +142,7 @@ models:
       long-horizon reasoning, research, and agentic workflows. Stronger
       price-performance than the previous flagship generation.
     ratings: {reasoning: 5, cost: 2, precision: 5, code: 5}
-    activated: true
+    activated: false
 
   # ---------------------------------------------------------------------------
   # OPENAI — BALANCED / GENERAL PURPOSE
@@ -156,7 +159,7 @@ models:
       retaining strong reasoning, coding, tool use, and long-context
       performance. Good default for most non-trivial tasks.
     ratings: {reasoning: 4, cost: 4, precision: 4, code: 4}
-    activated: true
+    activated: false
 
   # ---------------------------------------------------------------------------
   # OPENAI — LOW COST / HIGH VOLUME
@@ -173,7 +176,7 @@ models:
       lightweight coding, and first-pass agent work. Good cheap first
       attempt before escalating to Terra or Sol.
     ratings: {reasoning: 3, cost: 5, precision: 3, code: 3}
-    activated: true
+    activated: false
 
   # ---------------------------------------------------------------------------
   # OPENAI — PREVIOUS GENERATION (KEEP FOR FALLBACK / COMPARISON)
@@ -189,7 +192,7 @@ models:
       reasoning and coding, but generally superseded by GPT-5.6 Sol/Terra.
       Useful as a compatibility or provider-fallback option.
     ratings: {reasoning: 4, cost: 3, precision: 4, code: 5}
-    activated: true
+    activated: false
 
   - name: gpt-5.4
     model: openai/gpt-5.4
@@ -201,7 +204,7 @@ models:
       stable GPT-5.x fallback is desirable or when workloads do not require
       the newest generation.
     ratings: {reasoning: 4, cost: 4, precision: 4, code: 4}
-    activated: true
+    activated: false
 
   - name: gpt-5.4-mini
     model: openai/gpt-5.4-mini
@@ -213,7 +216,7 @@ models:
       coding, structured transformations, classification, and high-volume
       workloads where frontier reasoning is unnecessary.
     ratings: {reasoning: 3, cost: 5, precision: 3, code: 3}
-    activated: true
+    activated: false
 
   # ---------------------------------------------------------------------------
   # OPENAI — LEGACY GENERAL PURPOSE
@@ -229,7 +232,7 @@ models:
       structured generation, coding, and workloads where explicit reasoning
       models are unnecessary. Retain primarily for compatibility.
     ratings: {reasoning: 3, cost: 3, precision: 4, code: 4}
-    activated: true
+    activated: false
 
   - name: gpt-4.1-mini
     model: openai/gpt-4.1-mini
@@ -241,10 +244,133 @@ models:
       extraction, classification, transformation, and straightforward code
       generation.
     ratings: {reasoning: 2, cost: 5, precision: 3, code: 3}
-    activated: true
+    activated: false
 
   # ---------------------------------------------------------------------------
-  # LOCAL / SELF-HOSTED (OPTIONAL)
+  # DEEPSEEK — CORE CATALOG
+  # ---------------------------------------------------------------------------
+
+  - name: deepseek-v4-pro
+    model: deepseek/deepseek-v4-pro
+    api_key: ""
+    base_url: "https://api.deepseek.com"
+    reasoning_effort: ""             # 混合架构，思考模式由 API 参数控制，非 effort
+    description: >
+      DeepSeek 旗舰。1.6T 总参 / 49B 激活，在 Agentic Coding、数学与代码基准上
+      对标顶级闭源模型。适合硬核调试、架构推理、复杂多步任务。长上下文效率极高
+      （1M context 下每 token FLOPs 比 V3.2 少 73%）。价格仍显著低于海外旗舰。
+    ratings: {reasoning: 5, cost: 2, precision: 4, code: 5}
+    activated: false
+
+  - name: deepseek-v4-flash
+    model: deepseek/deepseek-v4-flash
+    api_key: ""
+    base_url: "https://api.deepseek.com"
+    reasoning_effort: ""
+    description: >
+      DeepSeek 主力廉价模型（V4.1 Flash 为其后续统一命名）。284B 总参 / 13B 激活，
+      推理能力接近 Pro，支持原生图像输入。在简单 Agent 任务上与 Pro 相当，速度快、
+      定价极低（输入 ~$0.15/M），适合高频调用、分类提取、轻量代码与第一轮尝试。
+    ratings: {reasoning: 3, cost: 5, precision: 3, code: 3}
+    activated: false
+
+  # ---------------------------------------------------------------------------
+  # DEEPSEEK — LEGACY / FALLBACK
+  # ---------------------------------------------------------------------------
+
+  - name: deepseek-v3.2
+    model: deepseek/deepseek-v3.2
+    api_key: ""
+    base_url: "https://api.deepseek.com"
+    reasoning_effort: ""
+    description: >
+      上一代通用模型。V4 发布后已非主力，但保留用于兼容性或作为 DeepSeek 阵营内的
+      额外 fallback。不具备 V4 的长上下文效率与 Agentic 能力。
+    ratings: {reasoning: 3, cost: 4, precision: 3, code: 3}
+    activated: false
+
+  # ---------------------------------------------------------------------------
+  # GOOGLE — GEMINI (CLOUD)
+  #
+  # Gemini itself is proprietary/closed — Google never releases its weights,
+  # so there is no local Gemini variant to run via Ollama or anything else.
+  # (Gemma, in the LOCAL section below, is Google's actual open-weight
+  # family — a different product, not a smaller Gemini.) These two run
+  # against Google's own hosted API.
+  # ---------------------------------------------------------------------------
+
+  - name: gemini-3-pro
+    model: gemini/gemini-3-pro-preview
+    api_key: ""
+    base_url: ""
+    reasoning_effort: ""
+    description: >
+      Google's flagship Gemini 3 Pro. Natively multimodal (text, audio,
+      images, video, entire code repositories) with an optional "Deep
+      Think" mode for harder problems. Best choice here when correctness
+      on hard, multi-step reasoning matters more than cost or latency.
+    ratings: {reasoning: 5, cost: 2, precision: 5, code: 5}
+    activated: false
+
+  - name: gemini-3.7-flash
+    model: gemini/gemini-3.7-flash
+    api_key: ""
+    base_url: ""
+    reasoning_effort: ""
+    description: >
+      Faster, cheaper Gemini 3 workhorse, positioned by Google specifically
+      for coding and agentic work. Good default for most non-trivial tasks
+      when Pro's extra reasoning depth isn't needed.
+    ratings: {reasoning: 4, cost: 4, precision: 4, code: 4}
+    activated: false
+
+  # ---------------------------------------------------------------------------
+  # MOONSHOT AI — KIMI (CLOUD)
+  #
+  # Kimi K2/K3 are genuinely open-weight (unlike Gemini above) but are NOT
+  # in the LOCAL section: the real weights are ~1-2.8T-parameter MoE models,
+  # and Ollama's own library only ships `:cloud` tags for them (self-hosting
+  # needs ~250-600GB combined RAM/VRAM — far past "a single consumer GPU or
+  # unified-memory Mac," the bar every LOCAL entry below actually meets).
+  # Used here via Moonshot's own hosted API instead.
+  # ---------------------------------------------------------------------------
+
+  - name: kimi-k3
+    model: moonshot/kimi-k3
+    api_key: ""
+    base_url: ""
+    reasoning_effort: ""
+    description: >
+      Moonshot's current flagship — 2.8T parameters (MoE), the largest
+      open-weight model released to date. Moonshot's own recommended
+      default for reasoning-heavy and agentic work.
+    ratings: {reasoning: 5, cost: 2, precision: 4, code: 4}
+    activated: false
+
+  - name: kimi-k2.7-code
+    model: moonshot/kimi-k2.7-code
+    api_key: ""
+    base_url: ""
+    reasoning_effort: ""
+    description: >
+      Moonshot's coding-specialized model — more reliable instruction
+      following in long contexts, higher success rate on coding tasks,
+      256K context. Prefer this over K3 specifically for coding/agentic
+      tasks; K3 is the more general, stronger-reasoning default.
+    ratings: {reasoning: 3, cost: 3, precision: 3, code: 5}
+    activated: false
+
+  # ---------------------------------------------------------------------------
+  # LOCAL / SELF-HOSTED, OPEN-WEIGHT (OPTIONAL)
+  #
+  # All served locally via Ollama (base_url points at Ollama's own default
+  # port, 11434 — swap in a different local server's URL if you use one
+  # instead). Tags/sizes below were checked against ollama.com/library at
+  # the time this file was written (Sept 2026) and picked for being
+  # realistically runnable on a single consumer GPU or unified-memory Mac,
+  # not the largest/cloud-hosted variant of each family — re-check
+  # ollama.com/library before pulling, since tags change (see CLAUDE.md's
+  # "Model ID strings ... change over time" gotcha).
   # ---------------------------------------------------------------------------
 
   - name: ollama-local
@@ -258,7 +384,66 @@ models:
       trivial, privacy-sensitive, or offline tasks; expect it to often fall
       through to a better-rated model in the chain on anything complex.
     ratings: {reasoning: 2, cost: 5, precision: 2, code: 2}
-    activated: true
+    activated: false
+
+  - name: gemma3-local
+    model: ollama/gemma3
+    api_key: ""
+    base_url: "http://localhost:11434"
+    reasoning_effort: ""
+    description: >
+      Google's open-weight Gemma 3 (untagged pull = the 4B variant, ~3.3GB,
+      128K context — runs comfortably on a single consumer GPU or an
+      8-16GB unified-memory Mac). Solid general-purpose small local model;
+      not competitive with frontier models on hard reasoning or large
+      codebases.
+    ratings: {reasoning: 2, cost: 5, precision: 2, code: 2}
+    activated: false
+
+  - name: qwen3-local
+    model: ollama/qwen3
+    api_key: ""
+    base_url: "http://localhost:11434"
+    reasoning_effort: ""
+    description: >
+      Alibaba's open-weight Qwen3 (untagged pull = the 8B variant, ~5GB,
+      40K context, hybrid think/non-think reasoning mode — runs on a
+      mid-range GPU or 16GB of RAM). A step up from Gemma 3/Llama 3 on
+      reasoning at a similar local footprint; still well below frontier
+      cloud models on hard problems.
+    ratings: {reasoning: 3, cost: 5, precision: 3, code: 3}
+    activated: false
+
+  - name: qwen3-coder-local
+    model: ollama/qwen3-coder:30b
+    api_key: ""
+    base_url: "http://localhost:11434"
+    reasoning_effort: ""
+    description: >
+      Alibaba's open-weight, code-specialized Qwen3-Coder (30B total / 3.3B
+      active MoE, ~19GB at Q4_K_M, 256K native context — the practical
+      local size; the family's 480B variant is cloud-scale, not this one).
+      Needs a real GPU (16-20GB VRAM) or a large unified-memory Mac, unlike
+      the lighter chat models above — rated a touch less cost-effective for
+      that reason even though it's still free to run. Best local choice
+      here specifically for coding/agentic tasks.
+    ratings: {reasoning: 3, cost: 4, precision: 3, code: 4}
+    activated: false
+
+  - name: glm-4.7-flash-local
+    model: ollama/glm-4.7-flash
+    api_key: ""
+    base_url: "http://localhost:11434"
+    reasoning_effort: ""
+    description: >
+      Zhipu AI's open-weight GLM-4.7-Flash (30B total / 3B active MoE,
+      ~19GB at Q4_K_M, 198K context — "30B quality at 3B speed"). Similar
+      hardware footprint to Qwen3-Coder above but a general-purpose model,
+      not code-specialized specifically. Use the plain `glm-4.7-flash` tag,
+      not `glm-4.7:cloud` — the latter is a 357B cloud-hosted variant, not
+      something you run locally.
+    ratings: {reasoning: 3, cost: 4, precision: 3, code: 3}
+    activated: false
 
 # =============================================================================
 # DETERMINISTIC TASK -> WEIGHT-VECTOR CLASSIFICATION
