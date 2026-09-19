@@ -290,11 +290,61 @@ discovery, full-pipeline integration, agent-facing tool coverage);
 verified live against a real on-disk `frontend/`+`backend/` monorepo
 fixture. See `ROADMAP.md`'s decisions log for the full reasoning.
 
+### 22. Populate real token usage on the OpenAI-compatible adapter
+`/v1/chat/completions`'s response always hardcodes
+`{"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}` — flagged
+in `MANUAL.md`'s Known Limitations as "usage isn't tracked," phrased as if
+the SDK doesn't expose it. It does: item #17's own research confirmed
+`conversation.conversation_stats.get_combined_metrics().accumulated_cost`
+is a real, live-verified field on `ConversationStats`/`Metrics`
+(`openhands.sdk.llm.utils.metrics`), and that same object almost certainly
+carries token counts alongside cost (worth a quick `/verify-sdk` check of
+its exact shape). Populating a real `usage` object from it is a
+self-contained, low-risk fix — no wire-format change, just no longer
+lying about a field OpenAI clients already expect to be meaningful.
+
+### 23. `TaskStore`/`harness-admin` has no way to list existing tasks or projects
+Every operation on the task store — `harness-admin show/delete-task`,
+`DELETE /tasks/{id}`, `DELETE /tasks?project=`, `GET /tasks/{id}` — requires
+already knowing the exact task ID or project name ahead of time. There's no
+`list()`/`list_projects()` on the `TaskStore` ABC or any of its four
+backends, so an operator with a shared redis/sqlite/mysql/postgres store
+and no external record of what's in it has no way to discover what to
+clean up. Each backend would need a real (if backend-specific) listing
+query — sqlite/mysql/postgres via a plain `SELECT DISTINCT`, redis via a
+`SCAN` over `harness:task:*`/`harness:project:*` keys (memory is trivial).
+Worth doing since the whole feature's stated purpose (item #14) is
+letting a long-running deployment manage its own history.
+
+### 24. Surface `model_decisions` on `GET /tasks/{id}` (server mode)
+`TaskOutcome.model_decisions` and `MODEL_DECISIONS.md` already exist, but
+`server.py`'s `TaskRecord`/task-store schema were deliberately
+left untouched when auto model selection was built — adding the field
+would mean a real migration story for already-deployed sqlite/mysql/
+postgres task stores (an existing on-disk table lacks the new column;
+`metadata.create_all()` only creates missing *tables*, not columns on an
+existing one), which wasn't in scope for that change and needs its own
+deliberate design rather than being bundled into an unrelated feature.
+
+### 25. `harness-admin`: preview model classification/ranking without running a task
+Tuning a `models.yaml`'s `ratings`/`task_profiles` today means actually
+running a real (billed) task and reading `MODEL_DECISIONS.md` after the
+fact to see what got picked and why. `model_catalog.py`'s
+`classify_task()`/`rank_candidates()` are already pure, no-network
+functions — a `harness-admin classify "<task text>" [--models-file PATH]`
+subcommand printing the matched profile, its weights, and the full ranked
+table would let someone iterate on the catalog for free.
+
+### 26. Remove dead code: `_find_marker_dir` in `run_tests_tool.py`
+Defined but never called anywhere in `src/` — noticed while reworking
+`detect_project()` for item #21's monorepo-ambiguity fix, which didn't use
+it either. Trivial, no behavior change; just hasn't been cleaned up yet.
+
 ---
 
 ## later
 
-### 22. Interactive-session smoke testing (drive `SOLVE`-style prompts)
+### 27. Interactive-session smoke testing (drive `SOLVE`-style prompts)
 Explicitly rejected as unscoped in `ROADMAP.md`'s decisions log: there's no
 general, safe way to guess what an arbitrary generated program expects to
 read on stdin, so a wrong guess produces either a misleading failure or
@@ -303,26 +353,26 @@ script or genuine interactive-session automation — real, open-ended
 design work, not a quick addition. Documented as a known permanent gap
 rather than a near-term goal.
 
-### 23. Non-Python/Node/Go/Rust/Java ecosystems (Ruby, PHP, .NET, C/C++, …)
+### 28. Non-Python/Node/Go/Rust/Java ecosystems (Ruby, PHP, .NET, C/C++, …)
 Verification is intentionally scoped to "where project metadata makes the
 commands unambiguous" (per the original ask). Extending further is
 legitimate but speculative — no current task or project in this repo's
 history has needed it, so building it now is pure speculative coverage.
 
-### 24. Java verification in this project's own dev/CI environment
+### 29. Java verification in this project's own dev/CI environment
 Detection is solid; actual `mvn`/`gradle` execution is untested here
 because neither toolchain is installed in this dev machine or the Docker
 agent-server image. Low urgency: fixing it means adding a Maven/Gradle
 toolchain to the Docker image and dev setup for a language this project
 has never actually been asked to build, not fixing a code defect.
 
-### 25. Recursive entry-point discovery
+### 30. Recursive entry-point discovery
 Entry points are only checked at a Python project's root directory, not
 recursively — deliberate, since a deeper walk risks matching an unrelated
 `__main__` guard inside a vendored dependency. Revisit only if a real
 nested-entry-point project is actually seen; no evidence of that yet.
 
-### 26. `reasoning_summary` / `extended_thinking_budget` / `enable_encrypted_reasoning` wiring
+### 31. `reasoning_summary` / `extended_thinking_budget` / `enable_encrypted_reasoning` wiring
 The SDK exposes three more reasoning-related `LLM` fields beyond
 `reasoning_effort`. Deliberately left unwired: `reasoning_effort` is the
 only one that's provider-agnostic (matches the model-agnostic invariant)
@@ -330,7 +380,7 @@ and the one the SDK's own docs recommend for new integrations; the others
 are provider-specific or legacy. Only worth adding if a specific provider
 integration actually needs one.
 
-### 27. Protect verification infrastructure from silent agent changes
+### 32. Protect verification infrastructure from silent agent changes
 The agent can modify or remove tests, build scripts, lint configuration, or
 type-check configuration before the harness verifies the project. Prompt
 guidance says not to weaken checks (e.g. `skills/lifecycle/testing-and-
@@ -342,3 +392,57 @@ files before the run, compare them after edits, and report or reject
 changes to those files unless the task explicitly requested them. This
 requires a careful policy for legitimate test and configuration changes,
 so it is not a small patch.
+
+### 33. Auto model selection: proactive per-task_tracker-item switching
+Explicitly deferred as a real v1.1 idea during the auto-model-selection
+design conversation, not forgotten: today's fallback only ever triggers
+on a failure
+(API-level or a failed verification/task_tracker retry) — it never
+proactively picks a different model for a different *kind* of sub-step
+within the same task with nothing having gone wrong yet (e.g. a cheap
+model for scaffolding, a stronger one for the one genuinely hard
+algorithm). The natural hook is the SDK's own `task_tracker` tool, since
+each item already has its own title/description to classify against — but
+the agent can update the tracker many times within a single
+`conversation.run()` call, and the harness doesn't regain control until
+that whole call ends, so this needs the harness to interrupt/resume a run
+around tracker-item transitions (`conversation.pause()`/`interrupt()`
+exist on the SDK and are worth checking), not just swap between
+already-separate `.run()` calls the way today's escalation does. Real,
+open-ended design work.
+
+### 34. Auto model selection: mid-task fallback under `HARNESS_EXECUTION=docker`
+Confirmed live against the SDK source: `RemoteConversation`'s Python
+client has no `switch_llm`/`switch_profile` method, even though the remote
+agent-server it talks to already exposes a matching `POST
+/conversations/{id}/switch_llm` endpoint server-side. Not building this
+against `RemoteConversation`'s private `_client`/`_id` attributes was a
+deliberate call (unstable, undocumented internals — exactly the SDK-drift
+risk golden rule 2 exists to avoid). Revisit once a future `openhands-sdk`
+release adds the public method; at that point this is additive (one
+`cfg.execution` check to remove), not a redesign.
+
+### 35. Auto model selection: escalate toward capability, not just next-best-fit
+The fallback chain is one static list ranked by fit for the *classified
+task type*, walked forward under any failure — so falling back on a
+verification failure moves to the next-best-*fit* candidate, which isn't
+guaranteed to be more capable in an absolute sense (only usually is, in a
+catalog where a task profile's weighted axes happen to correlate with
+overall model strength). A more deliberate version would re-rank toward
+raw capability specifically for a *quality*-triggered escalation (not an
+API-level one, where "try any working alternative" is the actual goal) —
+this needs its own design pass (what does "capability" mean independent of
+task fit — a separate rating axis? the same axes unweighted?), not a
+quick patch to the existing chain-walking logic.
+
+### 36. Auto model selection: a condenser safety net for context-window mismatches
+Falling back to a model with a meaningfully smaller context window than
+whatever's accumulated in the conversation so far isn't explicitly
+handled — today it just surfaces as a context-overflow error, which is
+itself an API-level failure and so falls through to the *next* candidate
+anyway (a real, if inelegant, self-healing property already confirmed
+live). Configuring an `LLMSummarizingCondenser` when auto-selection is on,
+and/or ordering the fallback chain to avoid switching down to a much
+smaller window without first calling the SDK's `conversation.condense()`,
+would handle this more deliberately. Not urgent: the current behavior
+degrades gracefully rather than silently breaking.
