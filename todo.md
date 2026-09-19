@@ -335,10 +335,11 @@ functions — a `harness-admin classify "<task text>" [--models-file PATH]`
 subcommand printing the matched profile, its weights, and the full ranked
 table would let someone iterate on the catalog for free.
 
-### 26. Remove dead code: `_find_marker_dir` in `run_tests_tool.py`
-Defined but never called anywhere in `src/` — noticed while reworking
-`detect_project()` for item #21's monorepo-ambiguity fix, which didn't use
-it either. Trivial, no behavior change; just hasn't been cleaned up yet.
+### 26. ~~Remove dead code: `_find_marker_dir` in `run_tests_tool.py`~~ — DONE
+Removed — it was defined but never called anywhere in `src/`, confirmed
+again immediately before deleting it. No behavior change (full suite,
+536 tests, still passes); `ruff check`/`format --check` unaffected (the
+file's few pre-existing lint findings are unrelated to this function).
 
 ---
 

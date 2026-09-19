@@ -92,21 +92,6 @@ _LANGUAGE_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
-def _find_marker_dir(working_dir: str, names: set[str]) -> str | None:
-    """First directory (depth-bounded `os.walk`) under `working_dir`
-    containing any of `names`, or None."""
-    base_depth = working_dir.rstrip(os.sep).count(os.sep)
-    for root, dirs, files in os.walk(working_dir):
-        depth = root.rstrip(os.sep).count(os.sep) - base_depth
-        if depth >= _MAX_SCAN_DEPTH:
-            dirs[:] = []
-            continue
-        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS and not d.startswith(".")]
-        if any(name in files for name in names):
-            return root
-    return None
-
-
 @dataclass(frozen=True)
 class ProjectDetection:
     """Stage 1 result: what kind of project this is, and where its

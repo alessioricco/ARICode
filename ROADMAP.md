@@ -2283,3 +2283,8 @@ build plan. This file is the living, evolving companion to that static plan.
     `<artifacts_dir>/<project>/<run_id>/`; and the default
     (`HARNESS_ARTIFACTS_DIR` unset) confirmed to write nothing at all —
     no `artifacts` directory created anywhere.
+- **Removed `_find_marker_dir()` from `run_tests_tool.py` — genuine dead
+  code, not a behavior change.** Defined but never called anywhere in
+  `src/`, confirmed both when first noticed (during item #21's
+  `detect_project()` rework, which didn't need it either) and again
+  immediately before deleting it. Full suite (536 tests) unaffected.
