@@ -1,4 +1,11 @@
-# Coding-Agent Harness
+   _____ __________.___  _________            .___      
+  /  _  \\______   \   | \_   ___ \  ____   __| _/____  
+ /  /_\  \|       _/   | /    \  \/ /  _ \ / __ |/ __ \ 
+/    |    \    |   \   | \     \___(  <_> ) /_/ \  ___/ 
+\____|__  /____|_  /___|  \______  /\____/\____ |\___  >
+        \/       \/              \/            \/    \/ 
+
+# AriCode — Agentic Routing Intelligence for autonomous software engineering agents.
 
 A model-agnostic coding/software agent harness built on the
 [OpenHands Software Agent SDK](https://docs.openhands.dev/sdk). Give it a task; it

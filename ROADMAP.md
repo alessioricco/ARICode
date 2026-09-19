@@ -2390,3 +2390,27 @@ build plan. This file is the living, evolving companion to that static plan.
   - MANUAL.md's "Skills" section now says plainly that these three aren't
     shipped and points at `github.com/anthropics/skills` for anyone who
     wants to add them back locally themselves.
+- **Project renamed `coding-agent-harness` → AriCode — branding only, not
+  the importable package.** User explicitly chose the shallowest of three
+  scoped options after being asked directly (repo/package/CLI/env-var
+  depth all carry different risk): the GitHub repo, the PyPI-style
+  distribution name (`pyproject.toml`'s `name`), the Docker image tag
+  (`DEFAULT_DOCKER_IMAGE`/`HARNESS_DOCKER_IMAGE`'s default value),
+  `server.py`'s FastAPI `title` and `/v1/models` `owned_by` string, and
+  doc/prose titles all changed to `aricode`/AriCode. Deliberately
+  unchanged: `import harness`, `python -m harness`, every `HARNESS_*`
+  env var, and the `harness-admin` console script — standard PyPI
+  practice (a distribution name can differ from its import name), and it
+  meant zero backward-compatibility impact on any existing `.env`,
+  `models.yaml`, or script already configured against this project.
+  GitHub repo itself was renamed by the user directly via the web UI (no
+  `gh` CLI available in this environment); `git remote set-url` was used
+  to point `origin` at the new URL, then verified live via `git ls-remote`
+  that it actually resolves. `uv.lock` needed an explicit `uv lock` run
+  (not just `uv pip install -e ".[dev]"`, which rebuilds the editable
+  install but doesn't itself rewrite the lockfile's own recorded package
+  name) to stop reporting the old name. Verified live end-to-end after
+  every change: full suite (552 passed), `python -m harness --help`
+  unaffected, `harness-admin --help` unaffected, and a real `FastAPI`
+  app instantiated via `create_app()` showing `title == "AriCode"` and a
+  live `/v1/models` response showing `owned_by == "aricode"`.

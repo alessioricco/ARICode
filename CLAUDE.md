@@ -1,4 +1,4 @@
-# CLAUDE.md — Coding-Agent Harness
+# CLAUDE.md — AriCode
 
 Project memory for Claude Code. Read this first, every session.
 

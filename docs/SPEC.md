@@ -1,4 +1,4 @@
-# Build Spec — Coding-Agent Harness on the OpenHands SDK
+# Build Spec — AriCode on the OpenHands SDK
 
 The canonical build plan for this repo. Claude Code implements it milestone by
 milestone (section 11). Project memory and guardrails are in ../CLAUDE.md.
@@ -49,7 +49,7 @@ execution mode). Switching provider = edit `LLM_MODEL` only.
 ## 5. Project structure
 
 ```
-coding-agent-harness/
+aricode/
 ├── CLAUDE.md
 ├── README.md
 ├── .gitignore

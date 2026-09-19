@@ -225,7 +225,7 @@ as a cost proxy.
 
 ### 18. Add CI (GitHub Actions) running tests and lint on push/PR
 The repo is hosted on GitHub (`origin` points to
-`github.com/alessioricco/coding-agent-harness`) but has no
+`github.com/alessioricco/ARICode`) but has no
 `.github/workflows` at all — the 249-test suite and `ruff check`/
 `format --check` only run when a human or agent remembers to run them
 locally, per `CLAUDE.md`'s own working-style rule. A minimal workflow

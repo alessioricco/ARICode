@@ -34,7 +34,7 @@ DEFAULT_SKILLS_DIR = "./skills"
 DEFAULT_VERIFY_TESTS = "always"
 DEFAULT_MAX_VERIFY_RETRIES = 2
 DEFAULT_MAX_TASK_SECONDS = 1800
-DEFAULT_DOCKER_IMAGE = "coding-agent-harness/agent-server:local"
+DEFAULT_DOCKER_IMAGE = "aricode/agent-server:local"
 DEFAULT_DOCKER_PLATFORM = (
     "linux/arm64" if _platform.machine().lower() in ("arm64", "aarch64") else "linux/amd64"
 )

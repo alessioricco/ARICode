@@ -79,7 +79,7 @@ template with every variable documented inline.
 | `HARNESS_EXECUTION` | `local` | `local` \| `docker` — see [Execution modes](#execution-modes). |
 | `HARNESS_PROJECTS_DIR` | `./projects` | Root folder for generated projects; `--project NAME` resolves to `HARNESS_PROJECTS_DIR/NAME`. |
 | `HARNESS_SKILLS_DIR` | `./skills` | Shared skill catalog loaded into every agent's `AgentContext` — see [Skills](#skills). |
-| `HARNESS_DOCKER_IMAGE` | `coding-agent-harness/agent-server:local` | Image used for `HARNESS_EXECUTION=docker`. Built automatically on first use. |
+| `HARNESS_DOCKER_IMAGE` | `aricode/agent-server:local` | Image used for `HARNESS_EXECUTION=docker`. Built automatically on first use. |
 | `HARNESS_DOCKER_PLATFORM` | auto-detected from host arch | `linux/amd64` \| `linux/arm64`. Leave blank to auto-detect (arm64 on Apple Silicon, amd64 otherwise). |
 | `HARNESS_VERIFY_TESTS` | `always` | `always` \| `never` — after the agent finishes, re-run the project's own tests and, if they fail, send the real failure back and let the agent retry. See [Test verification](#test-verification). |
 | `HARNESS_MAX_VERIFY_RETRIES` | `2` | How many automated fix-and-retry cycles `HARNESS_VERIFY_TESTS=always` allows before giving up. |
@@ -948,7 +948,7 @@ The agent loop and its tools run inside a container instead of this process.
   that. Rebuild manually after changing any custom tool:
 
   ```bash
-  docker build -f docker/agent-server.Dockerfile -t coding-agent-harness/agent-server:local .
+  docker build -f docker/agent-server.Dockerfile -t aricode/agent-server:local .
   ```
 
 - The resolved workspace directory is bind-mounted into the container at

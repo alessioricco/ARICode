@@ -8,7 +8,7 @@
 # image. Build from the repo root (src/harness/workspace.py does this
 # automatically on first use):
 #
-#   docker build -f docker/agent-server.Dockerfile -t coding-agent-harness/agent-server:local .
+#   docker build -f docker/agent-server.Dockerfile -t aricode/agent-server:local .
 #
 # This same image is meant to generalize beyond local `docker run`: push it to
 # a registry (e.g. ECR) and any compute backend that can run a container and

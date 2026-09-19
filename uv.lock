@@ -236,6 +236,68 @@ wheels = [
 ]
 
 [[package]]
+name = "aricode"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "openhands-sdk" },
+    { name = "openhands-tools" },
+    { name = "python-dotenv" },
+    { name = "pyyaml" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+sandbox = [
+    { name = "openhands-agent-server" },
+    { name = "openhands-workspace" },
+]
+server = [
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+store-mysql = [
+    { name = "pymysql" },
+    { name = "sqlalchemy" },
+]
+store-postgres = [
+    { name = "psycopg2-binary" },
+    { name = "sqlalchemy" },
+]
+store-redis = [
+    { name = "redis" },
+]
+store-sqlite = [
+    { name = "sqlalchemy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", marker = "extra == 'server'", specifier = ">=0.110" },
+    { name = "httpx", marker = "extra == 'server'", specifier = ">=0.27" },
+    { name = "openhands-agent-server", marker = "extra == 'sandbox'" },
+    { name = "openhands-sdk", specifier = "==1.47.0" },
+    { name = "openhands-tools", specifier = "==1.47.0" },
+    { name = "openhands-workspace", marker = "extra == 'sandbox'" },
+    { name = "psycopg2-binary", marker = "extra == 'store-postgres'", specifier = ">=2.9" },
+    { name = "pymysql", marker = "extra == 'store-mysql'", specifier = ">=1.1" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "python-dotenv", specifier = ">=1.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "redis", marker = "extra == 'store-redis'", specifier = ">=5.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
+    { name = "sqlalchemy", marker = "extra == 'store-mysql'", specifier = ">=2.0" },
+    { name = "sqlalchemy", marker = "extra == 'store-postgres'", specifier = ">=2.0" },
+    { name = "sqlalchemy", marker = "extra == 'store-sqlite'", specifier = ">=2.0" },
+    { name = "uvicorn", extras = ["standard"], marker = "extra == 'server'", specifier = ">=0.30" },
+]
+provides-extras = ["dev", "sandbox", "server", "store-sqlite", "store-mysql", "store-postgres", "store-redis"]
+
+[[package]]
 name = "attrs"
 version = "26.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -758,68 +820,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/27/fb/576f067976d320f5f
 wheels = [
     { url = "https://files.pythonhosted.org/packages/88/39/799be3f2f0f38cc727ee3b4f1445fe6d5e4133064ec2e4115069418a5bb6/cloudpickle-3.1.2-py3-none-any.whl", hash = "sha256:9acb47f6afd73f60dc1df93bb801b472f05ff42fa6c84167d25cb206be1fbf4a", size = 22228, upload-time = "2025-11-03T09:25:25.534Z" },
 ]
-
-[[package]]
-name = "coding-agent-harness"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "openhands-sdk" },
-    { name = "openhands-tools" },
-    { name = "python-dotenv" },
-    { name = "pyyaml" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-]
-sandbox = [
-    { name = "openhands-agent-server" },
-    { name = "openhands-workspace" },
-]
-server = [
-    { name = "fastapi" },
-    { name = "httpx" },
-    { name = "uvicorn", extra = ["standard"] },
-]
-store-mysql = [
-    { name = "pymysql" },
-    { name = "sqlalchemy" },
-]
-store-postgres = [
-    { name = "psycopg2-binary" },
-    { name = "sqlalchemy" },
-]
-store-redis = [
-    { name = "redis" },
-]
-store-sqlite = [
-    { name = "sqlalchemy" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "fastapi", marker = "extra == 'server'", specifier = ">=0.110" },
-    { name = "httpx", marker = "extra == 'server'", specifier = ">=0.27" },
-    { name = "openhands-agent-server", marker = "extra == 'sandbox'" },
-    { name = "openhands-sdk", specifier = "==1.47.0" },
-    { name = "openhands-tools", specifier = "==1.47.0" },
-    { name = "openhands-workspace", marker = "extra == 'sandbox'" },
-    { name = "psycopg2-binary", marker = "extra == 'store-postgres'", specifier = ">=2.9" },
-    { name = "pymysql", marker = "extra == 'store-mysql'", specifier = ">=1.1" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
-    { name = "python-dotenv", specifier = ">=1.0" },
-    { name = "pyyaml", specifier = ">=6.0" },
-    { name = "redis", marker = "extra == 'store-redis'", specifier = ">=5.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
-    { name = "sqlalchemy", marker = "extra == 'store-mysql'", specifier = ">=2.0" },
-    { name = "sqlalchemy", marker = "extra == 'store-postgres'", specifier = ">=2.0" },
-    { name = "sqlalchemy", marker = "extra == 'store-sqlite'", specifier = ">=2.0" },
-    { name = "uvicorn", extras = ["standard"], marker = "extra == 'server'", specifier = ">=0.30" },
-]
-provides-extras = ["dev", "sandbox", "server", "store-sqlite", "store-mysql", "store-postgres", "store-redis"]
 
 [[package]]
 name = "colorama"
