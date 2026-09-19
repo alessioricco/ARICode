@@ -19,6 +19,7 @@ reference — how to actually run and configure the thing.
 - [Configuration reference](#configuration-reference)
 - [CLI reference](#cli-reference)
 - [Server mode (HTTP/WebSocket)](#server-mode-httpwebsocket)
+- [Task registry persistence](#task-registry-persistence)
 - [Projects: one subfolder per generated project](#projects-one-subfolder-per-generated-project)
 - [Skills](#skills)
 - [Execution modes](#execution-modes)
@@ -80,6 +81,12 @@ template with every variable documented inline.
 | `HARNESS_VERIFY_TESTS` | `always` | `always` \| `never` — after the agent finishes, re-run the project's own tests and, if they fail, send the real failure back and let the agent retry. See [Test verification](#test-verification). |
 | `HARNESS_MAX_VERIFY_RETRIES` | `2` | How many automated fix-and-retry cycles `HARNESS_VERIFY_TESTS=always` allows before giving up. |
 | `HARNESS_MAX_TASK_SECONDS` | `1800` | Shared wall-clock budget (seconds) for one whole task — the initial run plus every task_tracker/verification retry combined, not just a single `conversation.run()` call. See [Task budget](#task-budget). |
+| `HARNESS_TASK_STORE` | `memory` | `memory` \| `redis` \| `sqlite` \| `mysql` \| `postgres` — server-mode task registry backend, consulted only by `harness-server`/`harness-admin`. See [Task registry persistence](#task-registry-persistence). |
+| `HARNESS_TASK_TTL_SECONDS` | `0` | Seconds a completed/failed task record is kept before it's eligible for purge; `0` means keep forever. |
+| `HARNESS_TASK_STORE_SQLITE_PATH` | `./harness_tasks.db` | sqlite backend only. |
+| `HARNESS_TASK_STORE_MYSQL_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_DATABASE` | `localhost` / `3306` / `root` / *(empty)* / `harness` | mysql backend only. |
+| `HARNESS_TASK_STORE_POSTGRES_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_DATABASE` | `localhost` / `5432` / `postgres` / *(empty)* / `harness` | postgres backend only. |
+| `HARNESS_TASK_STORE_REDIS_HOST` / `_PORT` / `_DB` / `_PASSWORD` / `_USE_TLS` | `localhost` / `6379` / `0` / *(empty)* / `false` | redis backend only. |
 
 ## CLI reference
 
@@ -297,12 +304,35 @@ only changes the specific "nothing could be checked" case. The `WS
 /tasks/stream` equivalent sends a `{"type": "error", ...}` event instead of
 `{"type": "result", ...}` in the same situation.
 
-**In-memory only:** the task registry lives in the server process's memory —
-restarting the server loses all task history, and it isn't shared across
-multiple server processes/workers. Fine for a single long-running server
-process; would need a real store (Redis, a DB) to survive restarts or scale
-horizontally. Records are also never purged — long-running servers will
-accumulate them for now (see [Known limitations](#known-limitations)).
+**Persistence is pluggable, in-memory by default:** the default
+`HARNESS_TASK_STORE=memory` is byte-for-byte the original behavior — the
+task registry lives in the server process's memory, lost on restart, not
+shared across multiple server processes. A deployment that needs
+persistence across restarts, sharing across workers, a retention limit, or
+per-project cleanup can switch to `redis`/`sqlite`/`mysql`/`postgres` — see
+[Task registry persistence](#task-registry-persistence) below.
+
+### `DELETE /tasks/{task_id}` — delete one task record
+
+```bash
+curl -X DELETE http://127.0.0.1:8000/tasks/f4fe313c-...
+# -> 200 {"task_id": "f4fe313c-...", "deleted": true}
+# -> 404 if task_id doesn't exist
+```
+
+### `DELETE /tasks?project=NAME` — delete every record for a project
+
+```bash
+curl -X DELETE "http://127.0.0.1:8000/tasks?project=my-api"
+# -> 200 {"project": "my-api", "deleted": 3}
+```
+
+`deleted` is the count actually removed — `0` for an unknown/empty project
+is a normal result, not an error. See [Task registry
+persistence](#task-registry-persistence) for the equivalent `harness-admin`
+CLI commands (useful for a maintenance script, or when the store backend
+being cleaned up isn't the one the caller's own server process is running
+against).
 
 ### `WS /tasks/stream` — live streaming, single connection
 
@@ -403,6 +433,66 @@ against the live LLM produce the correct final narrative text (confirmed
 only after finding and fixing the role-filtering bug above via a live call
 that came back with empty content despite the underlying task completing
 successfully).
+
+## Task registry persistence
+
+Server mode's task registry (everything `GET /tasks/{id}` returns) is
+pluggable via `HARNESS_TASK_STORE`, one of `memory` (default) | `redis` |
+`sqlite` | `mysql` | `postgres`. Switching backend is purely a config
+change — `server.py`'s request-handling code is identical either way, and
+`memory` remains byte-for-byte the original in-process behavior, so
+enabling this feature is never a silent change for an existing deployment.
+
+| Backend | Extra to install | Notes |
+|---|---|---|
+| `memory` (default) | none | Unbounded unless a TTL is set; lost on restart; not shared across processes. |
+| `sqlite` | `uv pip install -e ".[store-sqlite]"` | One local file (`HARNESS_TASK_STORE_SQLITE_PATH`); survives restarts, single-process only (sqlite's own concurrent-writer limits apply). |
+| `mysql` | `uv pip install -e ".[store-mysql]"` | Shared across multiple `harness-server` processes/workers. |
+| `postgres` | `uv pip install -e ".[store-postgres]"` | Same as mysql. |
+| `redis` | `uv pip install -e ".[store-redis]"` | Shared across processes; TTL uses Redis's own native per-key expiration (`EX`) instead of a periodic sweep. |
+
+sqlite/mysql/postgres all share one implementation (SQLAlchemy Core,
+parameterized by connection URL) — one `harness_tasks` table, identical
+query logic on all three dialects.
+
+**Retention (`HARNESS_TASK_TTL_SECONDS`, default `0` = keep forever):** once
+set to a positive number of seconds, a *terminal* (`completed`/`failed`)
+task record older than that is eligible for removal — a `pending`/`running`
+task is never purged regardless of TTL. For `memory`/`sqlite`/`mysql`/
+`postgres`, `harness-server` runs a background sweep every 60 seconds while
+a TTL is configured. For `redis`, there is no sweep — a terminal record's
+key is written with `EX=<ttl>` at save time, so Redis itself expires and
+deletes it natively; a `pending`/`running` record's key is written with no
+expiration (`PERSIST`) until it reaches a terminal state.
+
+**Deleting a project's records on demand** doesn't require waiting for a
+TTL — both a REST call and a CLI command do this, use whichever fits:
+
+```bash
+curl -X DELETE "http://127.0.0.1:8000/tasks?project=my-api"
+# or, without a running server request (e.g. a maintenance script, or a
+# store backend other than the one a given server process is using):
+uv run harness-admin delete-project my-api
+```
+
+### `harness-admin` — task store maintenance CLI
+
+Talks directly to whatever backend `HARNESS_TASK_STORE` selects (via the
+same `build_task_store(load_config())` `server.py` uses) — no running
+server required, just the same `.env`.
+
+```bash
+uv run harness-admin show <task_id>              # print one record's summary
+uv run harness-admin delete-task <task_id>        # delete one record; exits 1 if unknown
+uv run harness-admin delete-project <NAME>        # delete every record for a project
+uv run harness-admin purge [--ttl-seconds N]      # manually trigger a TTL purge sweep
+```
+
+`purge` uses `HARNESS_TASK_TTL_SECONDS` from `.env` by default; pass
+`--ttl-seconds` to override it for one run. It refuses to run (exit `1`,
+no records touched) when the effective TTL is `0` — "keep forever" is a
+real setting, not "unset", so `purge` never silently deletes everything
+just because no TTL happens to be configured.
 
 ## Projects: one subfolder per generated project
 
@@ -1284,10 +1374,13 @@ uv run pytest -q
   adding one is additive, not a rewrite.
 - **Provider-swap live proof (spec Milestone 3) hasn't been run** — see
   [Switching LLM provider / model](#switching-llm-provider--model).
-- **Server mode's task registry is in-memory, per-process, and unbounded.**
-  `POST`/`GET /tasks` state is lost on restart, not shared across multiple
-  server processes, and completed/failed records are never purged — see
-  [Server mode](#server-mode-httpwebsocket).
+- **Server mode's task registry is in-memory, per-process, and unbounded
+  only by default (`HARNESS_TASK_STORE=memory`).** A `redis`/`sqlite`/
+  `mysql`/`postgres` backend, a TTL-based purge, and on-demand delete-by-
+  project/delete-by-id (REST and `harness-admin` CLI) are all available —
+  see [Task registry persistence](#task-registry-persistence). Still true
+  of the default `memory` backend specifically: state is lost on restart
+  and not shared across multiple server processes.
 - **The OpenAI-compatible endpoint doesn't replay chat history** — only the
   last `user` message becomes the task; prior `assistant` turns are dropped.
   **Streaming is message-level, not token-level** — each SSE chunk is one

@@ -18,6 +18,12 @@ from harness.config import (
     DEFAULT_MAX_VERIFY_RETRIES,
     DEFAULT_PROJECTS_DIR,
     DEFAULT_SKILLS_DIR,
+    DEFAULT_TASK_STORE,
+    DEFAULT_TASK_STORE_MYSQL_PORT,
+    DEFAULT_TASK_STORE_POSTGRES_PORT,
+    DEFAULT_TASK_STORE_REDIS_PORT,
+    DEFAULT_TASK_STORE_SQLITE_PATH,
+    DEFAULT_TASK_TTL_SECONDS,
     DEFAULT_VERIFY_TESTS,
     DEFAULT_WORKSPACE,
     Config,
@@ -141,9 +147,7 @@ def test_missing_key_without_base_url_raises():
 
 def test_base_url_allows_missing_key():
     # Local models can be keyless: base_url present, api_key absent -> OK.
-    cfg = load_config(
-        {"LLM_MODEL": "ollama/llama3", "LLM_BASE_URL": "http://localhost:11434"}
-    )
+    cfg = load_config({"LLM_MODEL": "ollama/llama3", "LLM_BASE_URL": "http://localhost:11434"})
     assert cfg.api_key is None
     assert cfg.base_url == "http://localhost:11434"
 
@@ -328,3 +332,157 @@ def test_resolve_project_dir_allows_a_symlink_that_stays_inside(tmp_path):
     resolved = resolve_project_dir(str(projects_dir), "myapp")
 
     assert os.path.realpath(resolved) == os.path.realpath(str(real_target))
+
+
+# --- Server-mode task registry persistence (task_store.py config) ----------
+
+
+def test_task_store_defaults_to_memory_with_no_ttl():
+    cfg = load_config(_base_env())
+
+    assert cfg.task_store == DEFAULT_TASK_STORE == "memory"
+    assert cfg.task_ttl_seconds == DEFAULT_TASK_TTL_SECONDS == 0
+
+
+def test_task_store_accepts_each_backend():
+    for backend in ("memory", "redis", "sqlite", "mysql", "postgres"):
+        cfg = load_config(_base_env(HARNESS_TASK_STORE=backend))
+        assert cfg.task_store == backend
+
+
+def test_task_store_is_case_insensitive():
+    cfg = load_config(_base_env(HARNESS_TASK_STORE="SQLITE"))
+    assert cfg.task_store == "sqlite"
+
+
+def test_invalid_task_store_raises():
+    with pytest.raises(ConfigError, match="HARNESS_TASK_STORE"):
+        load_config(_base_env(HARNESS_TASK_STORE="oracle"))
+
+
+def test_task_ttl_seconds_zero_means_keep_forever():
+    cfg = load_config(_base_env(HARNESS_TASK_TTL_SECONDS="0"))
+    assert cfg.task_ttl_seconds == 0
+
+
+def test_task_ttl_seconds_accepts_a_positive_value():
+    cfg = load_config(_base_env(HARNESS_TASK_TTL_SECONDS="3600"))
+    assert cfg.task_ttl_seconds == 3600
+
+
+@pytest.mark.parametrize("bad", ["-1", "abc", "3.5"])
+def test_invalid_task_ttl_seconds_raises(bad):
+    with pytest.raises(ConfigError, match="HARNESS_TASK_TTL_SECONDS"):
+        load_config(_base_env(HARNESS_TASK_TTL_SECONDS=bad))
+
+
+def test_task_store_sqlite_path_defaults_and_overrides():
+    cfg = load_config(_base_env())
+    assert cfg.task_store_sqlite_path == DEFAULT_TASK_STORE_SQLITE_PATH
+
+    cfg = load_config(_base_env(HARNESS_TASK_STORE_SQLITE_PATH="/tmp/custom.db"))
+    assert cfg.task_store_sqlite_path == "/tmp/custom.db"
+
+
+def test_task_store_mysql_fields_default_and_override():
+    cfg = load_config(_base_env())
+    assert cfg.task_store_mysql_host == "localhost"
+    assert cfg.task_store_mysql_port == DEFAULT_TASK_STORE_MYSQL_PORT
+    assert cfg.task_store_mysql_user == "root"
+    assert cfg.task_store_mysql_password is None
+    assert cfg.task_store_mysql_database == "harness"
+
+    cfg = load_config(
+        _base_env(
+            HARNESS_TASK_STORE_MYSQL_HOST="db.internal",
+            HARNESS_TASK_STORE_MYSQL_PORT="3307",
+            HARNESS_TASK_STORE_MYSQL_USER="harness_user",
+            HARNESS_TASK_STORE_MYSQL_PASSWORD="secret",
+            HARNESS_TASK_STORE_MYSQL_DATABASE="harness_prod",
+        )
+    )
+    assert cfg.task_store_mysql_host == "db.internal"
+    assert cfg.task_store_mysql_port == 3307
+    assert cfg.task_store_mysql_user == "harness_user"
+    assert cfg.task_store_mysql_password == "secret"
+    assert cfg.task_store_mysql_database == "harness_prod"
+
+
+def test_invalid_task_store_mysql_port_raises():
+    with pytest.raises(ConfigError, match="HARNESS_TASK_STORE_MYSQL_PORT"):
+        load_config(_base_env(HARNESS_TASK_STORE_MYSQL_PORT="not-a-port"))
+
+
+def test_task_store_postgres_fields_default_and_override():
+    cfg = load_config(_base_env())
+    assert cfg.task_store_postgres_host == "localhost"
+    assert cfg.task_store_postgres_port == DEFAULT_TASK_STORE_POSTGRES_PORT
+    assert cfg.task_store_postgres_user == "postgres"
+    assert cfg.task_store_postgres_password is None
+    assert cfg.task_store_postgres_database == "harness"
+
+    cfg = load_config(
+        _base_env(
+            HARNESS_TASK_STORE_POSTGRES_HOST="pg.internal",
+            HARNESS_TASK_STORE_POSTGRES_PORT="5433",
+            HARNESS_TASK_STORE_POSTGRES_USER="harness_user",
+            HARNESS_TASK_STORE_POSTGRES_PASSWORD="secret",
+            HARNESS_TASK_STORE_POSTGRES_DATABASE="harness_prod",
+        )
+    )
+    assert cfg.task_store_postgres_host == "pg.internal"
+    assert cfg.task_store_postgres_port == 5433
+    assert cfg.task_store_postgres_user == "harness_user"
+    assert cfg.task_store_postgres_password == "secret"
+    assert cfg.task_store_postgres_database == "harness_prod"
+
+
+def test_task_store_redis_fields_default_and_override():
+    cfg = load_config(_base_env())
+    assert cfg.task_store_redis_host == "localhost"
+    assert cfg.task_store_redis_port == DEFAULT_TASK_STORE_REDIS_PORT
+    assert cfg.task_store_redis_db == 0
+    assert cfg.task_store_redis_password is None
+    assert cfg.task_store_redis_use_tls is False
+
+    cfg = load_config(
+        _base_env(
+            HARNESS_TASK_STORE_REDIS_HOST="redis.internal",
+            HARNESS_TASK_STORE_REDIS_PORT="6380",
+            HARNESS_TASK_STORE_REDIS_DB="2",
+            HARNESS_TASK_STORE_REDIS_PASSWORD="secret",
+            HARNESS_TASK_STORE_REDIS_USE_TLS="true",
+        )
+    )
+    assert cfg.task_store_redis_host == "redis.internal"
+    assert cfg.task_store_redis_port == 6380
+    assert cfg.task_store_redis_db == 2
+    assert cfg.task_store_redis_password == "secret"
+    assert cfg.task_store_redis_use_tls is True
+
+
+@pytest.mark.parametrize("bad", ["-1", "abc"])
+def test_invalid_task_store_redis_db_raises(bad):
+    with pytest.raises(ConfigError, match="HARNESS_TASK_STORE_REDIS_DB"):
+        load_config(_base_env(HARNESS_TASK_STORE_REDIS_DB=bad))
+
+
+@pytest.mark.parametrize(
+    "value,expected", [("true", True), ("1", True), ("yes", True), ("on", True)]
+)
+def test_task_store_redis_use_tls_accepts_true_spellings(value, expected):
+    cfg = load_config(_base_env(HARNESS_TASK_STORE_REDIS_USE_TLS=value))
+    assert cfg.task_store_redis_use_tls is expected
+
+
+@pytest.mark.parametrize(
+    "value,expected", [("false", False), ("0", False), ("no", False), ("off", False)]
+)
+def test_task_store_redis_use_tls_accepts_false_spellings(value, expected):
+    cfg = load_config(_base_env(HARNESS_TASK_STORE_REDIS_USE_TLS=value))
+    assert cfg.task_store_redis_use_tls is expected
+
+
+def test_invalid_task_store_redis_use_tls_raises():
+    with pytest.raises(ConfigError, match="HARNESS_TASK_STORE_REDIS_USE_TLS"):
+        load_config(_base_env(HARNESS_TASK_STORE_REDIS_USE_TLS="maybe"))

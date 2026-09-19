@@ -239,17 +239,18 @@ def test_create_task_without_override_keeps_configured_model(monkeypatch):
     assert calls["cfg"].model == "anthropic/claude-x"
 
 
-def test_create_task_config_error_returns_400_immediately(monkeypatch):
+def test_create_app_raises_immediately_on_a_config_error(monkeypatch):
+    # load_config() is now called once at create_app() time (to build the
+    # task store), not deferred to the first request — a config error
+    # (missing LLM_MODEL, etc.) fails fast at server startup instead of
+    # silently starting a server that only reveals the problem later.
     def _raise() -> Config:
         raise ConfigError("LLM_MODEL is required")
 
     monkeypatch.setattr(server, "load_config", _raise)
 
-    client = TestClient(server.create_app())
-    response = client.post("/tasks", json={"task": "do something"})
-
-    assert response.status_code == 400
-    assert "LLM_MODEL is required" in response.json()["detail"]
+    with pytest.raises(ConfigError, match="LLM_MODEL is required"):
+        server.create_app()
 
 
 def test_get_task_reports_failure(monkeypatch):
@@ -593,6 +594,84 @@ def test_get_task_unknown_id_returns_404():
     assert response.status_code == 404
 
 
+def test_create_task_with_project_field_is_retrievable(monkeypatch):
+    def _fake_stream_task(task, cfg=None, on_message=None, acceptance_checks=None):
+        return _fake_outcome()
+
+    monkeypatch.setattr(server, "load_config", lambda: _cfg())
+    monkeypatch.setattr(server, "stream_task", _fake_stream_task)
+
+    client = TestClient(server.create_app())
+    task_id = client.post(
+        "/tasks", json={"task": "do something", "project": "acme-website"}
+    ).json()["task_id"]
+
+    _wait_for_status(client, task_id)
+    # `project` isn't echoed on GET /tasks/{id} today (no caller needs it
+    # back), but it must have been stored — proven indirectly via
+    # delete-by-project actually finding and removing this task below.
+    delete_response = client.delete("/tasks", params={"project": "acme-website"})
+    assert delete_response.status_code == 200
+    assert delete_response.json() == {"project": "acme-website", "deleted": 1}
+    assert client.get(f"/tasks/{task_id}").status_code == 404
+
+
+def test_delete_task_removes_it(monkeypatch):
+    def _fake_stream_task(task, cfg=None, on_message=None, acceptance_checks=None):
+        return _fake_outcome()
+
+    monkeypatch.setattr(server, "load_config", lambda: _cfg())
+    monkeypatch.setattr(server, "stream_task", _fake_stream_task)
+
+    client = TestClient(server.create_app())
+    task_id = client.post("/tasks", json={"task": "do something"}).json()["task_id"]
+    _wait_for_status(client, task_id)
+
+    response = client.delete(f"/tasks/{task_id}")
+
+    assert response.status_code == 200
+    assert response.json() == {"task_id": task_id, "deleted": True}
+    assert client.get(f"/tasks/{task_id}").status_code == 404
+
+
+def test_delete_task_unknown_id_returns_404():
+    client = TestClient(server.create_app())
+
+    response = client.delete("/tasks/does-not-exist")
+
+    assert response.status_code == 404
+
+
+def test_delete_tasks_by_project_only_removes_matching_project(monkeypatch):
+    def _fake_stream_task(task, cfg=None, on_message=None, acceptance_checks=None):
+        return _fake_outcome()
+
+    monkeypatch.setattr(server, "load_config", lambda: _cfg())
+    monkeypatch.setattr(server, "stream_task", _fake_stream_task)
+
+    client = TestClient(server.create_app())
+    kept_id = client.post("/tasks", json={"task": "t1", "project": "keep-me"}).json()["task_id"]
+    doomed_id = client.post("/tasks", json={"task": "t2", "project": "delete-me"}).json()["task_id"]
+    _wait_for_status(client, kept_id)
+    _wait_for_status(client, doomed_id)
+
+    response = client.delete("/tasks", params={"project": "delete-me"})
+
+    assert response.status_code == 200
+    assert response.json() == {"project": "delete-me", "deleted": 1}
+    assert client.get(f"/tasks/{doomed_id}").status_code == 404
+    assert client.get(f"/tasks/{kept_id}").status_code == 200
+
+
+def test_delete_tasks_by_project_unknown_project_returns_zero():
+    client = TestClient(server.create_app())
+
+    response = client.delete("/tasks", params={"project": "never-existed"})
+
+    assert response.status_code == 200
+    assert response.json() == {"project": "never-existed", "deleted": 0}
+
+
 def test_get_task_reflects_partial_progress(monkeypatch):
     started = threading.Event()
     finish = threading.Event()
@@ -678,19 +757,21 @@ def test_stream_task_with_model_override_swaps_llm(monkeypatch):
     assert calls["cfg"].model == "openai/gpt-4o"
 
 
-def test_stream_task_config_error_sends_error_and_closes(monkeypatch):
-    def _raise() -> Config:
-        raise ConfigError("LLM_MODEL is required")
-
-    monkeypatch.setattr(server, "load_config", _raise)
+def test_stream_task_per_request_config_error_sends_error_and_closes(monkeypatch):
+    # load_config() itself succeeds at create_app() startup (see
+    # test_create_app_raises_immediately_on_a_config_error for that case)
+    # — this covers a per-request config problem inside _resolve_cfg
+    # still surfacing cleanly as a WS error rather than an unhandled
+    # exception, the same way POST /tasks already does.
+    monkeypatch.setattr(server, "load_config", lambda: _cfg())
 
     client = TestClient(server.create_app())
     with client.websocket_connect("/tasks/stream") as ws:
-        ws.send_json({"task": "do something"})
+        ws.send_json({"task": "do something", "agents_md": "content"})
         message = ws.receive_json()
 
     assert message["type"] == "error"
-    assert "LLM_MODEL is required" in message["detail"]
+    assert "agents_md requires project" in message["detail"]
 
 
 # --- OpenAI-compatible /v1/... ---
@@ -872,20 +953,26 @@ def test_chat_completions_without_user_message_returns_400(monkeypatch):
     assert response.status_code == 400
 
 
-def test_chat_completions_config_error_returns_400(monkeypatch):
-    def _raise() -> Config:
-        raise ConfigError("LLM_MODEL is required")
-
-    monkeypatch.setattr(server, "load_config", _raise)
+def test_chat_completions_per_request_config_error_returns_400(monkeypatch):
+    # Same reframing as the WS test above: load_config() itself succeeds at
+    # startup; this covers a per-request config problem (an absolute
+    # `project`, rejected by resolve_project_dir — ChatCompletionRequest
+    # has no agents_md field to reuse the WS test's trigger) still
+    # returning a clean 400 rather than an unhandled exception.
+    monkeypatch.setattr(server, "load_config", lambda: _cfg())
 
     client = TestClient(server.create_app())
     response = client.post(
         "/v1/chat/completions",
-        json={"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
+        json={
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+            "project": "/etc/cron.d",
+        },
     )
 
     assert response.status_code == 400
-    assert "LLM_MODEL is required" in response.json()["detail"]
+    assert "must be relative, not absolute" in response.json()["detail"]
 
 
 def test_chat_completions_streaming_sends_sse_chunks(monkeypatch):

@@ -20,10 +20,19 @@ dev = ["pytest>=8.0", "ruff>=0.6"]
 sandbox = ["openhands-workspace", "openhands-agent-server"]
 # HTTP/WebSocket server mode (harness-server). See docs/SPEC.md section 9.
 server = ["fastapi>=0.110", "uvicorn[standard]>=0.30", "httpx>=0.27"]
+# Server-mode task registry persistence (HARNESS_TASK_STORE). See MANUAL.md
+# "Task registry persistence". sqlite needs only SQLAlchemy (its DBAPI driver
+# is Python's stdlib sqlite3); mysql/postgres each need their own extra on
+# top since a deployment typically only uses one SQL backend.
+store-sqlite = ["sqlalchemy>=2.0"]
+store-mysql = ["sqlalchemy>=2.0", "pymysql>=1.1"]
+store-postgres = ["sqlalchemy>=2.0", "psycopg2-binary>=2.9"]
+store-redis = ["redis>=5.0"]
 
 [project.scripts]
 harness = "harness.cli:main"
 harness-server = "harness.server:main"
+harness-admin = "harness.admin_cli:main"
 
 [build-system]
 requires = ["hatchling"]

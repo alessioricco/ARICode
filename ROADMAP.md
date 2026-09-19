@@ -234,7 +234,36 @@ build plan. This file is the living, evolving companion to that static plan.
   frame both expose `TaskOutcome.acceptance_results` (`asdict`-serialized)
   regardless of whether anything was downgraded, same "always visible, not
   just on override" treatment as `completion_contract`. Also not added to
-  `/v1/chat/completions`, for the same reason.
+  `/v1/chat/completions`, for the same reason. Also adds `DELETE
+  /tasks/{task_id}` (delete one record, `404` if unknown) and `DELETE
+  /tasks?project=NAME` (delete every record for a project, `{"deleted":
+  <count>}`, `0` for an unknown project is a normal result) — the REST half
+  of the task-store persistence feature below.
+- `task_store.py` — pluggable persistence for `server.py`'s task registry,
+  selected by `HARNESS_TASK_STORE` (`memory` default | `redis` | `sqlite` |
+  `mysql` | `postgres`), every backend implementing one `TaskStore` ABC
+  (`save`/`get`/`delete`/`delete_by_project`/`purge_expired`/`close`) so
+  `server.py`'s request-handling code never needs to know which is active.
+  `memory` is byte-for-byte the pre-existing dict-based behavior.
+  `sqlite`/`mysql`/`postgres` share one `SQLTaskStore` implementation via
+  SQLAlchemy Core, parameterized only by connection URL (`_build_sql_url`).
+  `redis`'s `RedisTaskStore` uses Redis's own native per-key expiration
+  (`EX` at write time for a terminal-status record) instead of a purge
+  sweep. `HARNESS_TASK_TTL_SECONDS` (default `0` = keep forever) governs
+  retention for every backend; `server.py` runs a 60s background sweep
+  calling `store.purge_expired()` only when a TTL is actually configured
+  (a no-op for `redis`, which already expires natively). `build_task_store(cfg)`
+  is the one factory both `server.py` and `admin_cli.py` call — adding a
+  future backend is one new branch there, not a change to either caller.
+  See MANUAL.md "Task registry persistence" for the user-facing writeup and
+  the decisions log below for why SQLAlchemy Core (not three hand-written
+  backends) and why REST + a CLI (not just one) for delete-by-project.
+- `admin_cli.py` (`harness-admin` console script) — a maintenance CLI
+  talking directly to `build_task_store(load_config())`, no running server
+  required: `show <id>`, `delete-task <id>`, `delete-project <NAME>`,
+  `purge [--ttl-seconds N]` (refuses to run at `ttl_seconds <= 0` rather
+  than silently no-op'ing or, worse, being one accidental flag away from
+  "delete everything"). The CLI half of the "Both" decision below.
 - `skills.py` — two mechanisms, don't conflate them: `load_skill_catalog()`
   loads the shared, reusable, trigger-based catalog (`skills/`, arbitrary
   subfolders for classification) into every agent's `AgentContext`
@@ -276,9 +305,6 @@ build plan. This file is the living, evolving companion to that static plan.
   MANUAL.md "Known limitations" for the precise verified-vs-detected
   breakdown). Detecting an arbitrary project's real test runner and
   installing its deps remains a real scope question, not a quick fix.
-- **Server-mode task registry persistence/cleanup** — in-memory, per-process,
-  unbounded. Needs at least a TTL-based purge; a real store (Redis/DB) for
-  persistence across restarts or multi-worker sharing is a bigger step.
 - **Milestone 3 live provider-swap proof** — blocked on a second provider key
   or local model endpoint (see table above).
 - **JS/TS lint tools (ESLint, etc.) are not auto-detected from config** —
@@ -1710,3 +1736,93 @@ build plan. This file is the living, evolving companion to that static plan.
   the SDK's default applies, matching `api_key`/`base_url`'s leniency, since
   "go back to the SDK default" is a legitimate thing to ask for and there's
   no equivalent of `model`'s "can't run with nothing selected" failure mode.
+- **Task-store persistence: a pluggable `TaskStore` ABC with five backends
+  (memory/redis/sqlite/mysql/postgres), not just a TTL purge on the
+  existing in-memory dict.** The backlog item as originally scoped was
+  narrower ("a TTL-based purge is a small, self-contained improvement; a
+  persistent store is a bigger step and only worth it if actually needed")
+  — the user's actual ask expanded this explicitly: full `.env`
+  configurability across all five backends, "keep forever" as a real
+  option, and delete-by-project. Two real architectural forks were
+  resolved via `AskUserQuestion` rather than picked unilaterally, since
+  both affect long-term maintenance cost, not just this change's size:
+  - **SQLAlchemy Core for all three SQL backends, not three hand-written
+    implementations** (user chose "SQLAlchemy (recommended)"). One
+    `SQLTaskStore`, parameterized only by connection URL, versus three
+    independent modules each hand-rolling its own DBAPI calls — SQLAlchemy
+    Core (not the ORM: there's exactly one table, no relationships,
+    `TaskRecord` is already a plain dataclass) gets connection pooling and
+    parameter binding for free and means one query-logic bug fix instead
+    of three. Upsert is implemented as "try UPDATE, INSERT if 0 rows
+    affected" rather than a dialect-specific `ON CONFLICT`/`ON DUPLICATE
+    KEY UPDATE` — slightly less efficient on first insert (two round
+    trips) but the same code path works unmodified on sqlite/mysql/
+    postgres, which is the entire point of sharing an implementation.
+  - **Delete-by-project exposed via both REST and CLI** (user chose
+    "Both" over either alone). Different callers need different access:
+    an application already talking to the running server over HTTP
+    shouldn't need a separate CLI invocation and its own copy of
+    `.env`/credentials; a one-off maintenance script, a cron job, or
+    cleanup against a backend that isn't the one a particular server
+    process is currently configured for benefits from a direct CLI that
+    doesn't require a server to be up at all. Both end up calling the same
+    `TaskStore.delete_by_project()` — no duplicated deletion logic, just
+    two thin entry points.
+  - **Redis TTL: native per-key expiration (`EX` at write time), not a
+    purge sweep.** Every other backend's `purge_expired()` does real work
+    (a `DELETE ... WHERE updated_at < cutoff`-shaped query); Redis's is a
+    deliberate no-op. Redis already has the exact mechanism this problem
+    needs built in — writing a second, harness-side sweep on top would be
+    slower (a polling loop instead of instant, server-side expiry),
+    redundant, and a second place the same bug (e.g. a wrong cutoff
+    calculation) could be introduced. `ttl_seconds` is fixed at
+    `RedisTaskStore.__init__` (from `cfg.task_ttl_seconds`), not a
+    per-`save()` parameter, specifically so `TaskStore.save(record)`'s
+    signature stays identical across every backend — `server.py` must
+    never need a backend-specific branch to call it.
+  - **`MemoryTaskStore.save()`/`get()` deep-copy the record — a
+    self-caught correctness fix, not a request.** The original in-memory
+    dict returned the *same* object reference a caller had handed it,
+    which was fine under the old code's single coarse `tasks_lock`
+    wrapping every mutation *and* every read together. Once that lock was
+    replaced by each backend's own internal locking (needed regardless,
+    since `server.py` no longer knows or cares which backend is active),
+    a live reference would let a concurrent `GET /tasks/{id}` observe a
+    record mid-mutation (the background task thread sets several fields
+    across several lines before its next `save()`), or let a caller
+    mutate a `get()`-returned record and have it "stick" with no explicit
+    `save()` — a bug that would only ever surface after switching to a
+    real backend, since SQL/Redis can only ever hand back fresh,
+    independently-deserialized snapshots, never a live handle. Standardizing
+    `MemoryTaskStore` on the same snapshot semantics via `copy.deepcopy`
+    in both methods makes all five backends behave identically, which is
+    the correct fix, not just a defensive one.
+  - **`create_app()` now builds the store once at startup
+    (`build_task_store(startup_cfg)`), which requires a valid `LLM_MODEL`/
+    `LLM_API_KEY` at server-start time rather than only on the first
+    request — a deliberate, minor behavior change.** A store may hold real
+    resources (a DB connection pool, a Redis client) that can't sensibly
+    be rebuilt per-request the way a per-request LLM override already is;
+    building it once at startup is the only sensible lifecycle for those.
+    Fail-fast (a broken `.env` refuses to start the server at all) beats
+    silently starting a server that will 500 on its first real request —
+    consistent with `_resolve_cfg`'s per-request `ConfigError`s already
+    being surfaced as clean `400`s rather than crashing the process.
+  - **`sqlite` needs only the `sqlalchemy` extra, not a DBAPI driver
+    package** — sqlite's driver (`sqlite3`) is Python's own standard
+    library; `mysql`/`postgres` each need a real separate extra
+    (`pymysql`, `psycopg2-binary`) on top of `sqlalchemy` since a given
+    deployment typically only uses one SQL backend and shouldn't be forced
+    to install drivers for the other two.
+  - **`mysql`/`postgres` were verified live against real Docker containers
+    (`postgres:16-alpine`, `mysql:8`) during development but are
+    deliberately not part of the automated `pytest` suite** — unlike
+    `sqlite` (a plain file, `tmp_path`-backed, zero external
+    dependencies) and `redis` (gated by
+    `pytest.mark.skipif(shutil.which("redis-server") is None, ...)`,
+    matching this repo's existing convention of spawning a real local
+    binary rather than mocking it), requiring Docker in every test
+    environment (including CI, if this project ever adds it) is a bigger
+    ask than this feature justifies. `test_task_store.py`'s module
+    docstring states this explicitly rather than leaving "why isn't mysql/
+    postgres tested" to be rediscovered later.

@@ -22,6 +22,7 @@ CONFIRM_MODES = ("never", "always")
 EXECUTION_MODES = ("local", "docker")
 DOCKER_PLATFORMS = ("linux/amd64", "linux/arm64")
 VERIFY_TESTS_MODES = ("always", "never")
+TASK_STORE_BACKENDS = ("memory", "redis", "sqlite", "mysql", "postgres")
 
 DEFAULT_WORKSPACE = "."
 DEFAULT_MAX_ITERATIONS = 50
@@ -36,6 +37,25 @@ DEFAULT_DOCKER_IMAGE = "coding-agent-harness/agent-server:local"
 DEFAULT_DOCKER_PLATFORM = (
     "linux/arm64" if _platform.machine().lower() in ("arm64", "aarch64") else "linux/amd64"
 )
+
+# --- Server-mode task registry persistence (see task_store.py) -------------
+DEFAULT_TASK_STORE = "memory"
+# 0 means "keep forever" — matches the pre-existing (unbounded, in-memory)
+# behavior exactly, so enabling a store backend alone never changes
+# retention; a TTL is something a caller opts into separately.
+DEFAULT_TASK_TTL_SECONDS = 0
+DEFAULT_TASK_STORE_SQLITE_PATH = "./harness_tasks.db"
+DEFAULT_TASK_STORE_MYSQL_HOST = "localhost"
+DEFAULT_TASK_STORE_MYSQL_PORT = 3306
+DEFAULT_TASK_STORE_MYSQL_USER = "root"
+DEFAULT_TASK_STORE_MYSQL_DATABASE = "harness"
+DEFAULT_TASK_STORE_POSTGRES_HOST = "localhost"
+DEFAULT_TASK_STORE_POSTGRES_PORT = 5432
+DEFAULT_TASK_STORE_POSTGRES_USER = "postgres"
+DEFAULT_TASK_STORE_POSTGRES_DATABASE = "harness"
+DEFAULT_TASK_STORE_REDIS_HOST = "localhost"
+DEFAULT_TASK_STORE_REDIS_PORT = 6379
+DEFAULT_TASK_STORE_REDIS_DB = 0
 
 
 class ConfigError(ValueError):
@@ -97,6 +117,33 @@ class Config:
     # means "don't override" — the SDK's own default ('high') applies.
     reasoning_effort: str | None = None
 
+    # Server-mode task registry persistence (see task_store.py). Default
+    # ("memory", no TTL) is byte-for-byte the pre-existing behavior — this
+    # entire feature is additive, never a silent behavior change for an
+    # existing server-mode deployment.
+    task_store: str = DEFAULT_TASK_STORE  # one of TASK_STORE_BACKENDS
+    task_ttl_seconds: int = DEFAULT_TASK_TTL_SECONDS  # 0 = keep forever
+
+    task_store_sqlite_path: str = DEFAULT_TASK_STORE_SQLITE_PATH
+
+    task_store_mysql_host: str = DEFAULT_TASK_STORE_MYSQL_HOST
+    task_store_mysql_port: int = DEFAULT_TASK_STORE_MYSQL_PORT
+    task_store_mysql_user: str = DEFAULT_TASK_STORE_MYSQL_USER
+    task_store_mysql_password: str | None = None
+    task_store_mysql_database: str = DEFAULT_TASK_STORE_MYSQL_DATABASE
+
+    task_store_postgres_host: str = DEFAULT_TASK_STORE_POSTGRES_HOST
+    task_store_postgres_port: int = DEFAULT_TASK_STORE_POSTGRES_PORT
+    task_store_postgres_user: str = DEFAULT_TASK_STORE_POSTGRES_USER
+    task_store_postgres_password: str | None = None
+    task_store_postgres_database: str = DEFAULT_TASK_STORE_POSTGRES_DATABASE
+
+    task_store_redis_host: str = DEFAULT_TASK_STORE_REDIS_HOST
+    task_store_redis_port: int = DEFAULT_TASK_STORE_REDIS_PORT
+    task_store_redis_db: int = DEFAULT_TASK_STORE_REDIS_DB
+    task_store_redis_password: str | None = None
+    task_store_redis_use_tls: bool = False
+
 
 def _clean(value: str | None) -> str | None:
     """Trim whitespace; treat empty string as absent."""
@@ -124,6 +171,33 @@ def _parse_choice(value: str | None, *, default: str, choices: tuple[str, ...], 
         allowed = " | ".join(choices)
         raise ConfigError(f"{name} must be one of: {allowed}. Got {resolved!r}.")
     return resolved
+
+
+def _parse_nonnegative_int(value: str | None, *, default: int, name: str) -> int:
+    """Like `_parse_positive_int` but allows `0` — used only where `0` is a
+    real, meaningful setting ("no limit"/"keep forever"), not "unset".
+    """
+    if _clean(value) is None:
+        return default
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        raise ConfigError(f"{name} must be an integer, got {value!r}.") from None
+    if parsed < 0:
+        raise ConfigError(f"{name} must be zero or a positive integer, got {parsed}.")
+    return parsed
+
+
+def _parse_bool(value: str | None, *, default: bool, name: str) -> bool:
+    cleaned = _clean(value)
+    if cleaned is None:
+        return default
+    lowered = cleaned.lower()
+    if lowered in ("1", "true", "yes", "on"):
+        return True
+    if lowered in ("0", "false", "no", "off"):
+        return False
+    raise ConfigError(f"{name} must be a boolean (true/false), got {value!r}.")
 
 
 def load_config(env: Mapping[str, str] | None = None, *, dotenv_path: str = ".env") -> Config:
@@ -209,6 +283,71 @@ def load_config(env: Mapping[str, str] | None = None, *, dotenv_path: str = ".en
         name="HARNESS_MAX_TASK_SECONDS",
     )
 
+    task_store = _parse_choice(
+        env.get("HARNESS_TASK_STORE"),
+        default=DEFAULT_TASK_STORE,
+        choices=TASK_STORE_BACKENDS,
+        name="HARNESS_TASK_STORE",
+    )
+    task_ttl_seconds = _parse_nonnegative_int(
+        env.get("HARNESS_TASK_TTL_SECONDS"),
+        default=DEFAULT_TASK_TTL_SECONDS,
+        name="HARNESS_TASK_TTL_SECONDS",
+    )
+    task_store_sqlite_path = (
+        _clean(env.get("HARNESS_TASK_STORE_SQLITE_PATH")) or DEFAULT_TASK_STORE_SQLITE_PATH
+    )
+    task_store_mysql_host = (
+        _clean(env.get("HARNESS_TASK_STORE_MYSQL_HOST")) or DEFAULT_TASK_STORE_MYSQL_HOST
+    )
+    task_store_mysql_port = _parse_positive_int(
+        env.get("HARNESS_TASK_STORE_MYSQL_PORT"),
+        default=DEFAULT_TASK_STORE_MYSQL_PORT,
+        name="HARNESS_TASK_STORE_MYSQL_PORT",
+    )
+    task_store_mysql_user = (
+        _clean(env.get("HARNESS_TASK_STORE_MYSQL_USER")) or DEFAULT_TASK_STORE_MYSQL_USER
+    )
+    task_store_mysql_password = _clean(env.get("HARNESS_TASK_STORE_MYSQL_PASSWORD"))
+    task_store_mysql_database = (
+        _clean(env.get("HARNESS_TASK_STORE_MYSQL_DATABASE")) or DEFAULT_TASK_STORE_MYSQL_DATABASE
+    )
+    task_store_postgres_host = (
+        _clean(env.get("HARNESS_TASK_STORE_POSTGRES_HOST")) or DEFAULT_TASK_STORE_POSTGRES_HOST
+    )
+    task_store_postgres_port = _parse_positive_int(
+        env.get("HARNESS_TASK_STORE_POSTGRES_PORT"),
+        default=DEFAULT_TASK_STORE_POSTGRES_PORT,
+        name="HARNESS_TASK_STORE_POSTGRES_PORT",
+    )
+    task_store_postgres_user = (
+        _clean(env.get("HARNESS_TASK_STORE_POSTGRES_USER")) or DEFAULT_TASK_STORE_POSTGRES_USER
+    )
+    task_store_postgres_password = _clean(env.get("HARNESS_TASK_STORE_POSTGRES_PASSWORD"))
+    task_store_postgres_database = (
+        _clean(env.get("HARNESS_TASK_STORE_POSTGRES_DATABASE"))
+        or DEFAULT_TASK_STORE_POSTGRES_DATABASE
+    )
+    task_store_redis_host = (
+        _clean(env.get("HARNESS_TASK_STORE_REDIS_HOST")) or DEFAULT_TASK_STORE_REDIS_HOST
+    )
+    task_store_redis_port = _parse_positive_int(
+        env.get("HARNESS_TASK_STORE_REDIS_PORT"),
+        default=DEFAULT_TASK_STORE_REDIS_PORT,
+        name="HARNESS_TASK_STORE_REDIS_PORT",
+    )
+    task_store_redis_db = _parse_nonnegative_int(
+        env.get("HARNESS_TASK_STORE_REDIS_DB"),
+        default=DEFAULT_TASK_STORE_REDIS_DB,
+        name="HARNESS_TASK_STORE_REDIS_DB",
+    )
+    task_store_redis_password = _clean(env.get("HARNESS_TASK_STORE_REDIS_PASSWORD"))
+    task_store_redis_use_tls = _parse_bool(
+        env.get("HARNESS_TASK_STORE_REDIS_USE_TLS"),
+        default=False,
+        name="HARNESS_TASK_STORE_REDIS_USE_TLS",
+    )
+
     return Config(
         model=model,
         api_key=api_key,
@@ -225,6 +364,24 @@ def load_config(env: Mapping[str, str] | None = None, *, dotenv_path: str = ".en
         max_verify_retries=max_verify_retries,
         max_task_seconds=max_task_seconds,
         reasoning_effort=reasoning_effort,
+        task_store=task_store,
+        task_ttl_seconds=task_ttl_seconds,
+        task_store_sqlite_path=task_store_sqlite_path,
+        task_store_mysql_host=task_store_mysql_host,
+        task_store_mysql_port=task_store_mysql_port,
+        task_store_mysql_user=task_store_mysql_user,
+        task_store_mysql_password=task_store_mysql_password,
+        task_store_mysql_database=task_store_mysql_database,
+        task_store_postgres_host=task_store_postgres_host,
+        task_store_postgres_port=task_store_postgres_port,
+        task_store_postgres_user=task_store_postgres_user,
+        task_store_postgres_password=task_store_postgres_password,
+        task_store_postgres_database=task_store_postgres_database,
+        task_store_redis_host=task_store_redis_host,
+        task_store_redis_port=task_store_redis_port,
+        task_store_redis_db=task_store_redis_db,
+        task_store_redis_password=task_store_redis_password,
+        task_store_redis_use_tls=task_store_redis_use_tls,
     )
 
 

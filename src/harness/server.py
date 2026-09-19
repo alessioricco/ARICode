@@ -14,13 +14,22 @@ import queue
 import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass, field, replace
+from contextlib import asynccontextmanager
+from dataclasses import asdict, replace
 from typing import Any
 
 from .acceptance import parse_acceptance_checks
 from .config import Config, ConfigError, load_config, override_llm, resolve_project_dir
 from .runner import run_task, stream_task
 from .skills import write_project_context
+from .task_store import TaskRecord, TaskStore, build_task_store
+
+# How often the background purge loop checks for expired records — not
+# itself configurable (unlike HARNESS_TASK_TTL_SECONDS): a fixed interval
+# is a reasonable default for a sweep that only matters when a TTL is set
+# at all, and this project's config-surface philosophy is to add a knob
+# only for what a user actually asked to control (see ROADMAP.md).
+_PURGE_INTERVAL_SECONDS = 60
 
 _SENTINEL = object()
 
@@ -111,32 +120,6 @@ def _final_text_from_dumps(messages: list[dict]) -> str | None:
     return None
 
 
-@dataclass
-class _TaskRecord:
-    """In-memory record for an async /tasks submission.
-
-    Lives only in this process's memory — lost on restart, not shared across
-    server instances. Fine for a single-process server; would need a real
-    store (Redis, a DB) to survive restarts or scale to multiple workers.
-    """
-
-    id: str
-    task: str
-    status: str = "pending"  # pending -> running -> completed | failed
-    messages: list[dict] = field(default_factory=list)
-    error: str | None = None
-    updated_at: float = field(default_factory=time.time)
-    # `status == "completed"` only ever meant "the run ended without raising
-    # an exception" — it said nothing about whether verification actually
-    # passed. `verification_state`/`completion_contract` carry that (see
-    # runner.py's TaskOutcome) so a poller doesn't mistake a
-    # retry-exhausted or stuck run for a confirmed success just because
-    # `status` says "completed".
-    verification_state: str | None = None
-    completion_contract: dict[str, Any] | None = None
-    acceptance_results: list[dict[str, Any]] | None = None
-
-
 def create_app():
     try:
         from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -191,50 +174,73 @@ def create_app():
         llm_base_url: str | None = None
         llm_reasoning_effort: str | None = None
 
-    app = FastAPI(title="Coding-Agent Harness")
-    tasks: dict[str, _TaskRecord] = {}
-    tasks_lock = threading.Lock()
+    # Built once at startup, not per-request: a store may hold real
+    # resources (DB connections, a Redis client) that can't sensibly be
+    # rebuilt on every request the way a per-request LLM override can.
+    # This does mean `harness-server` now requires a valid LLM_MODEL/
+    # LLM_API_KEY at startup rather than only on the first request — a
+    # deliberate, minor behavior change (fail fast beats silently starting
+    # a broken server); see ROADMAP.md's decisions log.
+    startup_cfg = load_config()
+    store: TaskStore = build_task_store(startup_cfg)
+
+    @asynccontextmanager
+    async def _lifespan(_app: FastAPI):
+        yield
+        store.close()
+
+    app = FastAPI(title="Coding-Agent Harness", lifespan=_lifespan)
+
+    if startup_cfg.task_ttl_seconds > 0:
+
+        def _purge_loop() -> None:
+            while True:
+                time.sleep(_PURGE_INTERVAL_SECONDS)
+                try:
+                    store.purge_expired(startup_cfg.task_ttl_seconds)
+                except Exception:  # noqa: BLE001 - a purge glitch must not kill the server
+                    pass
+
+        threading.Thread(target=_purge_loop, daemon=True).start()
 
     def run_in_background(
-        record: _TaskRecord, cfg: Config, require_verification: bool, acceptance_checks
+        record: TaskRecord, cfg: Config, require_verification: bool, acceptance_checks
     ) -> None:
-        with tasks_lock:
-            record.status = "running"
-            record.updated_at = time.time()
+        record.status = "running"
+        record.updated_at = time.time()
+        store.save(record)
 
         def on_message(message) -> None:
-            with tasks_lock:
-                record.messages.append(message.model_dump(mode="json"))
-                record.updated_at = time.time()
+            record.messages.append(message.model_dump(mode="json"))
+            record.updated_at = time.time()
+            store.save(record)
 
         try:
             outcome = stream_task(
                 record.task, cfg=cfg, on_message=on_message, acceptance_checks=acceptance_checks
             )
-            with tasks_lock:
-                record.verification_state = outcome.verification_state
-                record.completion_contract = asdict(outcome.completion_contract)
-                record.acceptance_results = (
-                    [asdict(r) for r in outcome.acceptance_results]
-                    if outcome.acceptance_results
-                    else None
-                )
-                if require_verification and outcome.verification_state == "inconclusive":
-                    record.status = "failed"
-                    record.error = (
-                        "Verification was inconclusive and require_verification=true "
-                        "requested treating that as a failure: "
-                        + "; ".join(outcome.completion_contract.limitations)
-                    )
-                else:
-                    record.status = "completed"
-        except Exception as exc:  # noqa: BLE001 - surfaced via GET /tasks/{id}, not raised here
-            with tasks_lock:
+            record.verification_state = outcome.verification_state
+            record.completion_contract = asdict(outcome.completion_contract)
+            record.acceptance_results = (
+                [asdict(r) for r in outcome.acceptance_results]
+                if outcome.acceptance_results
+                else None
+            )
+            if require_verification and outcome.verification_state == "inconclusive":
                 record.status = "failed"
-                record.error = str(exc)
+                record.error = (
+                    "Verification was inconclusive and require_verification=true "
+                    "requested treating that as a failure: "
+                    + "; ".join(outcome.completion_contract.limitations)
+                )
+            else:
+                record.status = "completed"
+        except Exception as exc:  # noqa: BLE001 - surfaced via GET /tasks/{id}, not raised here
+            record.status = "failed"
+            record.error = str(exc)
         finally:
-            with tasks_lock:
-                record.updated_at = time.time()
+            record.updated_at = time.time()
+            store.save(record)
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -263,9 +269,8 @@ def create_app():
         except (ConfigError, ValueError) as exc:  # AcceptanceCheckError is a ValueError
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        record = _TaskRecord(id=str(uuid.uuid4()), task=request.task)
-        with tasks_lock:
-            tasks[record.id] = record
+        record = TaskRecord(id=str(uuid.uuid4()), task=request.task, project=request.project)
+        store.save(record)
         threading.Thread(
             target=run_in_background,
             args=(record, cfg, request.require_verification, acceptance_checks),
@@ -276,27 +281,36 @@ def create_app():
 
     @app.get("/tasks/{task_id}")
     def get_task(task_id: str) -> dict[str, Any]:
-        with tasks_lock:
-            record = tasks.get(task_id)
-            if record is None:
-                raise HTTPException(status_code=404, detail=f"Unknown task_id: {task_id}")
-            return {
-                "task_id": record.id,
-                "status": record.status,
-                "final_message": (
-                    _final_text_from_dumps(record.messages)
-                    if record.status == "completed"
-                    else None
-                ),
-                # See MANUAL.md "Test verification": `status == "completed"`
-                # only means the run didn't raise — check `verification_state`
-                # for whether it was actually confirmed working.
-                "verification_state": record.verification_state,
-                "completion_contract": record.completion_contract,
-                "acceptance_results": record.acceptance_results,
-                "messages": list(record.messages),
-                "error": record.error,
-            }
+        record = store.get(task_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"Unknown task_id: {task_id}")
+        return {
+            "task_id": record.id,
+            "status": record.status,
+            "final_message": (
+                _final_text_from_dumps(record.messages) if record.status == "completed" else None
+            ),
+            # See MANUAL.md "Test verification": `status == "completed"`
+            # only means the run didn't raise — check `verification_state`
+            # for whether it was actually confirmed working.
+            "verification_state": record.verification_state,
+            "completion_contract": record.completion_contract,
+            "acceptance_results": record.acceptance_results,
+            "messages": list(record.messages),
+            "error": record.error,
+        }
+
+    @app.delete("/tasks/{task_id}")
+    def delete_task(task_id: str) -> dict[str, Any]:
+        deleted = store.delete(task_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail=f"Unknown task_id: {task_id}")
+        return {"task_id": task_id, "deleted": True}
+
+    @app.delete("/tasks")
+    def delete_tasks_by_project(project: str) -> dict[str, Any]:
+        deleted = store.delete_by_project(project)
+        return {"project": project, "deleted": deleted}
 
     @app.websocket("/tasks/stream")
     async def stream(websocket: WebSocket) -> None:

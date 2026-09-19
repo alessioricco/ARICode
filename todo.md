@@ -177,13 +177,23 @@ were built to close everywhere else, just not reachable from this one
 entry point. Needs a deliberate wire-format extension decision (e.g. a
 custom field or a trailing system message), not a quick patch.
 
-### 14. Server-mode task-registry TTL purge
-`server.py`'s task registry is in-memory, per-process, and unbounded —
-fine for a dev/demo server, a real liability for anything long-running
-(memory grows forever; task IDs live forever). A TTL-based purge is a
-small, self-contained improvement; a persistent store (Redis/DB) is a
-bigger step and only worth it if multi-worker/restart-survives use is
-actually needed.
+### 14. ~~Server-mode task-registry TTL purge~~ — DONE
+Expanded well beyond the original "just a TTL purge" scope, per an explicit
+follow-up ask: a pluggable `task_store.py` with five backends (`memory`
+default, `redis`, `sqlite`, `mysql`, `postgres`), fully configurable via
+`.env` (`HARNESS_TASK_STORE*`), a `HARNESS_TASK_TTL_SECONDS` retention
+setting (`0` = keep forever), and delete-by-project exposed both ways —
+`DELETE /tasks?project=NAME` / `DELETE /tasks/{id}` on `server.py`, and a
+new `harness-admin` CLI (`show`/`delete-task`/`delete-project`/`purge`).
+sqlite/mysql/postgres share one SQLAlchemy Core implementation; redis uses
+native per-key TTL instead of a purge sweep. Verified live against real
+sqlite and redis-backed servers (task create/poll/delete/delete-by-project
+over real HTTP, plus Redis's native TTL actually expiring a key), and
+mysql/postgres against real Docker containers during development. See
+`ROADMAP.md`'s decisions log for the two `AskUserQuestion` calls (SQLAlchemy
+Core vs. three hand-written backends; REST vs. CLI vs. both for
+delete-by-project) and the `MemoryTaskStore` thread-safety fix found along
+the way.
 
 ### 15. ECS/EC2 (or other remote) execution backend
 `workspace.py`'s `build_workspace()` is already a single dispatch point —
