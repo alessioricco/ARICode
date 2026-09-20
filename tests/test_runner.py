@@ -52,6 +52,70 @@ def test_run_task_creates_a_file(tmp_path, monkeypatch):
     assert messages.outcome.verification_state in runner.VERIFICATION_STATES
 
 
+@pytest.mark.skipif(not _config_available(), reason="No LLM_MODEL/LLM_API_KEY configured in .env")
+def test_run_task_catches_entrypoint_ordering_bug_live(tmp_path, monkeypatch):
+    """Closes the "not yet re-verified live" caveat that recurs across
+    ROADMAP.md's Known Limitations for the `entrypoint-ordering`/smoke-run
+    checks (todo.md #16): those were previously only unit-tested against a
+    synthetic fixture and verified against one frozen historical repro
+    (`projects/hanoi/`), never through an actual `run_task()` call driving a
+    real LLM end to end.
+
+    Builds its own throwaway fixture in `tmp_path` rather than depending on
+    or referencing anything under the repo's own `projects/` directory —
+    that's user-managed runtime state, not a harness test fixture.
+    """
+    monkeypatch.setenv("HARNESS_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("HARNESS_VERIFY_TESTS", "always")
+
+    from harness.runner import run_task
+
+    # Same bug shape as test_run_tests_tool.py's
+    # test_full_verification_catches_the_live_ordering_bug_even_though_pytest_passes:
+    # `helper()` is called from inside the `__main__` guard but defined
+    # after it. Invisible to a test suite that only imports the module
+    # (pytest passes cleanly); real the moment the script is actually run.
+    (tmp_path / "app.py").write_text(
+        "def main():\n"
+        "    print('start')\n"
+        "    helper()\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n"
+        "\n"
+        "def helper():\n"
+        "    print('should have run')\n"
+    )
+    (tmp_path / "test_app.py").write_text(
+        "from app import main\n\ndef test_main_is_importable():\n    assert callable(main)\n"
+    )
+
+    messages = run_task(
+        "This directory already contains app.py and test_app.py, unrelated "
+        "to this task. Do not read, inspect, run, or modify them in any "
+        "way. Your only job: create a new file called STATUS.txt in this "
+        "same directory containing exactly one line: done. Do not run any "
+        "test or verification commands yourself. Then finish."
+    )
+    outcome = messages.outcome
+
+    assert (tmp_path / "STATUS.txt").exists()
+    # Plain pytest alone would have called this project "verified" —
+    # confirms the fixture actually reproduces the scenario, not a vacuous
+    # check.
+    pytest_check = next(c for c in outcome.checks if c.name == "pytest")
+    assert pytest_check.status == "passed"
+    # The decisive signal: the harness's own live, post-hoc verification
+    # loop must have caught a real problem pytest missed and driven at
+    # least one automated fix-and-recheck cycle on this live run — it must
+    # never silently report "verified" on the first, still-buggy pass.
+    assert outcome.retries_used >= 1
+    assert outcome.verification_state != "inconclusive"
+    ordering_check = next((c for c in outcome.checks if c.name == "entrypoint-ordering"), None)
+    if ordering_check is not None:
+        assert ordering_check.command == ""  # precomputed static check, no subprocess
+
+
 def _cfg(**overrides) -> Config:
     base = {
         "model": "openai/gpt-4o",

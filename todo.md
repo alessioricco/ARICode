@@ -202,13 +202,19 @@ not a rewrite. Useful if tasks need to run somewhere other than
 local/Docker (e.g. ephemeral cloud runners for parallel tasks), but
 nothing today demonstrates a concrete need for it.
 
-### 16. Dedicated live test for the entrypoint-ordering / smoke-run checks
-`entrypoint-ordering` and the Python smoke-run are unit-tested against a
-synthetic fixture and verified against one real historical repro
-(`projects/hanoi/`), but not yet re-verified against a *fresh* live agent
-run end-to-end. Cheap to do, closes the "not yet re-verified live" caveat
-that recurs across nearly every fix logged in `ROADMAP.md`'s Known
-Limitations section.
+### 16. ~~Dedicated live test for the entrypoint-ordering / smoke-run checks~~ — DONE
+Added `test_run_task_catches_entrypoint_ordering_bug_live` to
+`tests/test_runner.py`: builds the same ordering-bug fixture as
+`test_run_tests_tool.py`'s synthetic-fixture test in a fresh `tmp_path` (not
+`projects/hanoi/` or anything else under `projects/` — that directory is
+user-managed runtime state, not a harness test fixture), asks a real agent
+to do an unrelated task in the same directory without touching the buggy
+files, and asserts the harness's live, post-hoc verification loop actually
+caught the bug (`retries_used >= 1`) even though plain pytest alone passed.
+Skips cleanly without an API key, same as the existing e2e smoke test. Run
+live: the agent left the fixture untouched as instructed, the harness
+caught the entrypoint-ordering failure, sent the automated follow-up, and
+the agent fixed it — final state `verified` after 1 retry.
 
 ### 17. Per-task cost ceiling (`HARNESS_MAX_COST_USD`)
 `HARNESS_MAX_ITERATIONS` bounds how many *iterations* a run can take, but

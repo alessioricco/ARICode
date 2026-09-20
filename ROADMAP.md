@@ -280,9 +280,11 @@ for full transcripts if a fix needs revisiting:
    AST `entrypoint-ordering` check plus a `python <entry point>` smoke-run
    (closed stdin) — the smoke-run alone can't reach `SOLVE` itself;
    `entrypoint-ordering` is what actually catches this bug class. **Status:
-   applied, verified against the actual repro (entrypoint-ordering fails
+   applied; verified against the actual repro (entrypoint-ordering fails
    with the precise diagnosis while pytest passes) plus a synthetic
-   regression fixture.**
+   regression fixture; now also re-verified against a fresh live agent run
+   end to end (`test_run_task_catches_entrypoint_ordering_bug_live`,
+   `tests/test_runner.py`) — closes the "not yet re-verified live" caveat.**
 
 ## Decisions log (why, not just what)
 
@@ -520,3 +522,15 @@ considered and live-verification detail: `docs/ROADMAP.txt`.
   `python -m harness`, every `HARNESS_*` env var, `harness-admin` — a
   distribution name can differ from its import name, zero backward-compat
   impact.
+- **Live entrypoint-ordering/smoke-run test built its own throwaway
+  `tmp_path` fixture, not `projects/hanoi/` or anything under `projects/`**
+  — that directory is user-managed runtime state the harness must stay
+  agnostic to, not a stable test fixture (a standing project convention,
+  not new to this change). The task explicitly instructs the agent not to
+  touch the pre-planted buggy `app.py`, so the test's decisive assertion
+  (`retries_used >= 1`) reliably comes from the harness's own automated
+  verification catching it, not from the agent noticing it unprompted.
+  Verified live: the agent left the fixture untouched, the harness's
+  post-hoc verification caught the entrypoint-ordering failure (pytest
+  alone had already passed), sent the automated follow-up, and the agent
+  fixed it — final state `verified` after exactly 1 retry.
