@@ -236,5 +236,10 @@ models.yaml
 /skills/webapp-testing/
 /skills/web-artifacts-builder/
 
+# Third-party skills installed via `harness-admin skills install` — local
+# only, never committed (the lockfile third_party_skills.lock.json is not
+# ignored: it records provenance, not content).
+/third_party_skills/
+
 # Claude Code personal overrides
 .claude/settings.local.json

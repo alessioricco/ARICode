@@ -7,6 +7,7 @@ from openhands.sdk import Agent, AgentContext
 from .config import Config
 from .llm import build_llm
 from .skills import load_skill_catalog
+from .third_party_skills import load_enabled_skills
 from .tools import build_tools
 
 # The SDK ends a conversation turn (execution_status -> FINISHED) whenever the
@@ -166,8 +167,17 @@ def build_agent(cfg: Config, *, usage_id: str = "harness") -> Agent:
             _LIFECYCLE_SKILLS_SUFFIX,
         ]
     )
+    first_party_skills = load_skill_catalog(cfg.skills_dir)
+    # Third-party skills (third_party_skills.py) only when explicitly enabled
+    # in the lockfile; a name already used by a first-party skill is skipped,
+    # since AgentContext rejects duplicate skill names outright.
+    third_party = load_enabled_skills(
+        cfg.third_party_skills_dir,
+        cfg.third_party_skills_lock,
+        reserved_names={s.name for s in first_party_skills},
+    )
     agent_context = AgentContext(
-        skills=load_skill_catalog(cfg.skills_dir),
+        skills=[*first_party_skills, *third_party],
         # Resolved lazily by the Conversation once the real workspace path is
         # known (AgentContext itself doesn't know it yet) — this is what makes
         # a project's AGENTS.md / .agents/skills/ (see skills.write_project_context)

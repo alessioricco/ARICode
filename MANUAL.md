@@ -79,6 +79,8 @@ template with every variable documented inline.
 | `HARNESS_EXECUTION` | `local` | `local` \| `docker` — see [Execution modes](#execution-modes). |
 | `HARNESS_PROJECTS_DIR` | `./projects` | Root folder for generated projects; `--project NAME` resolves to `HARNESS_PROJECTS_DIR/NAME`. |
 | `HARNESS_SKILLS_DIR` | `./skills` | Shared skill catalog loaded into every agent's `AgentContext` — see [Skills](#skills). |
+| `HARNESS_THIRD_PARTY_SKILLS_DIR` | `./third_party_skills` | Local-only (gitignored) directory for third-party skills installed with `harness-admin skills install`. Must not overlap `HARNESS_SKILLS_DIR`. See [Third-party skills](#third-party-skills-harness-admin-skills). |
+| `HARNESS_THIRD_PARTY_SKILLS_LOCK` | `./third_party_skills.lock.json` | Lockfile recording each third-party skill's provenance, license, content hash, and enabled state (never its content). |
 | `HARNESS_DOCKER_IMAGE` | `aricode/agent-server:local` | Image used for `HARNESS_EXECUTION=docker`. Built automatically on first use. |
 | `HARNESS_DOCKER_PLATFORM` | auto-detected from host arch | `linux/amd64` \| `linux/arm64`. Leave blank to auto-detect (arm64 on Apple Silicon, amd64 otherwise). |
 | `HARNESS_VERIFY_TESTS` | `always` | `always` \| `never` — after the agent finishes, re-run the project's own tests and, if they fail, send the real failure back and let the agent retry. See [Test verification](#test-verification). |
@@ -703,6 +705,9 @@ uv run harness-admin delete-project <NAME>        # delete every record for a pr
 uv run harness-admin purge [--ttl-seconds N]      # manually trigger a TTL purge sweep
 ```
 
+`harness-admin skills ...` manages third-party skills — see
+[Third-party skills](#third-party-skills-harness-admin-skills).
+
 `purge` uses `HARNESS_TASK_TTL_SECONDS` from `.env` by default; pass
 `--ttl-seconds` to override it for one run. It refuses to run (exit `1`,
 no records touched) when the effective TTL is `0` — "keep forever" is a
@@ -840,11 +845,90 @@ from [anthropics/skills](https://github.com/anthropics/skills). They're
 genuinely third-party (each carries its own **Apache-2.0** `LICENSE.txt` —
 not MIT), so they're excluded here rather than redistributed under this
 repo's own MIT license; `.gitignore` deliberately keeps them out even if a
-local copy exists on disk. If you want them, download them yourself from
-that repo into `skills/frontend-design/`, `skills/webapp-testing/`, and
-`skills/web-artifacts-builder/` — `load_skill_catalog()` picks up whatever
-it finds there with no registration step, model-invoked as described
-above, one level deep per the AgentSkills depth caveat.
+local copy exists on disk. A copy placed by hand in `skills/frontend-design/`
+etc. is still loaded unconditionally, as before — but the recommended way to
+use these (or any other upstream skill) is now
+[Third-party skills](#third-party-skills-harness-admin-skills), which records
+provenance and requires explicit enablement. Don't do both for the same
+name: `install` refuses a name the shared catalog already has.
+
+### Third-party skills (`harness-admin skills`)
+
+Upstream `SKILL.md` skills can be installed locally without committing their
+contents to this repo. They're kept separate from the first-party catalog
+above:
+
+- **Files** go in `HARNESS_THIRD_PARTY_SKILLS_DIR` (default
+  `./third_party_skills/`, gitignored), one directory per skill, exactly one
+  level deep — the only depth at which the SDK detects `SKILL.md`
+  directories. The SDK's git clone cache for these lives in `.cache/` inside
+  the same directory.
+- **The lockfile** (`HARNESS_THIRD_PARTY_SKILLS_LOCK`, default
+  `./third_party_skills.lock.json`, *not* gitignored — commit it if you want
+  teammates to reproduce your set) records, per skill: upstream repository,
+  skill path, the requested ref and the resolved 40-character commit,
+  license identifier or `unknown`, the preserved license files, notes on any
+  license uncertainty, source and license URLs, a `sha256-` hash of every
+  installed file, and whether the skill is enabled. It never contains skill
+  content.
+
+```bash
+uv run harness-admin skills install github:anthropics/skills skills/frontend-design [--ref main]
+uv run harness-admin skills list
+uv run harness-admin skills enable frontend-design [--accept-unknown-license]
+uv run harness-admin skills disable frontend-design
+uv run harness-admin skills update frontend-design [--ref REF]
+uv run harness-admin skills remove frontend-design
+uv run harness-admin skills sync     # restore every locked skill at its pinned commit
+```
+
+**Installed is not enabled.** `install` always leaves a skill disabled and
+prints its source, commit, detected license, and any warnings. Only
+lockfile entries that are enabled are passed to the agent, and the loader
+re-checks everything at every agent build (the lockfile is a plain file):
+a skill is skipped, with a log warning, if its license is `unknown` and
+was not acknowledged, if its files no longer match the recorded hash, or if
+its name collides with a first-party skill. A directory in
+`third_party_skills/` with no lockfile entry is never loaded.
+
+**Sources** are limited to `github:owner/repo` or a credential-free
+`https://` git URL; the fetch uses the SDK's own git helper, confined to
+that one repository and the one skill path (no `..`, no absolute paths, no
+symlinks — an upstream symlink aborts the install). Access is whatever the
+host grants to an ordinary `git clone`; nothing here bypasses
+authentication or host restrictions.
+
+**Licenses.** On install, license and attribution files (`LICENSE*`,
+`LICENCE*`, `COPYING*`, `NOTICE*`, `AUTHORS*`, `COPYRIGHT*`) are preserved:
+those in the skill directory as-is, those at the repository root copied into
+`<skill>/.upstream/`. The license identifier is a conservative text match
+against a small set (MIT, Apache-2.0, BSD-2/3-Clause, ISC, MPL-2.0,
+Unlicense, CC0-1.0). A license file in the skill directory takes precedence
+over the root one. Anything else is `unknown`: no license file, unrecognized
+text (including copyleft or proprietary terms outside that set), conflicting
+files, or a `SKILL.md` `license:` field that contradicts the file or has no
+text behind it. `enable` refuses an `unknown` skill, explaining why, until
+you pass `--accept-unknown-license` after reviewing the upstream terms
+yourself. **This detection is a heuristic, not legal advice.** Downloading
+a skill, or gitignoring it, does not by itself give you permission to use
+it. Check the recorded license URL.
+
+**Updates** re-fetch at `--ref` (default: the ref originally requested). If
+the content hash or license changed, the skill is **disabled again** and any
+unknown-license acknowledgement is cleared — new upstream text is new
+untrusted input. `sync` re-fetches missing or modified skills at their pinned
+commit and installs them only if the hash matches the lockfile exactly
+(exit `1` otherwise); it never changes enablement.
+
+**Skill content is untrusted agent instructions.** The harness never runs a
+downloaded file: installed copies lose their executable bits, a skill's
+`.mcp.json` is ignored (loaded with `skip_mcp=True`, so no MCP server is
+started), and inline ``!`command` `` snippets — which the SDK's
+`invoke_skill` tool would otherwise run in a shell when the skill is
+invoked — are escaped on load so they show up as literal text. An enabled
+skill's *instructions* can still ask the agent to run its bundled scripts
+with the agent's normal tools. Read a skill before enabling it, and
+consider `HARNESS_CONFIRM_MODE=always` if you're unsure about one.
 
 ### Lifecycle skills (`skills/lifecycle/`)
 
@@ -1525,6 +1609,15 @@ uv run pytest -q
   downgrades a real `stream_task` run end to end.
 
 ## Known limitations
+
+- **Third-party skill license detection is a narrow text heuristic.**
+  `harness-admin skills` recognizes only a small set of permissive
+  licenses. Everything else, including GPL-family licenses, is reported as
+  `unknown` and needs `--accept-unknown-license`. A root-level license is
+  assumed to cover the skill path, and a note says so. Only
+  AgentSkills-format (`SKILL.md`) directories can be installed, not
+  legacy single-file `.md` skills. When a neutralized ``!`cmd` `` sits
+  inside a fenced code block, it renders with an extra leading `\`.
 
 - **Acceptance checks support only `file_exists`/`file_contains` — no
   "run this command" kind, even though that was one of the kinds

@@ -172,6 +172,19 @@ decisions log below for *why* a given design was chosen.
   `documentation-and-operational-readiness`,
   `completion-and-release-readiness` — which supersede an earlier
   downloaded five-skill `SKILL.md` set (see decisions log).
+- **`third_party_skills.py`** + `harness-admin skills
+  install|list|enable|disable|update|remove|sync` — local-only,
+  license-aware third-party `SKILL.md` skills. Files live in gitignored
+  `HARNESS_THIRD_PARTY_SKILLS_DIR`, one level deep. Provenance lives in a
+  JSON lockfile (`HARNESS_THIRD_PARTY_SKILLS_LOCK`: repo, path, commit SHA,
+  license id or `unknown`, URLs, `sha256-` integrity, enabled/acknowledged
+  flags, never content). `build_agent()` appends
+  `load_enabled_skills()` after the first-party catalog. That call
+  re-checks enabled, license acknowledgement, hash and name collision,
+  since `AgentContext` raises on duplicate names. `config.py` rejects a
+  third-party dir that overlaps `HARNESS_SKILLS_DIR`, because the
+  first-party `rglob("*.md")` would load downloaded files regardless of
+  enablement.
 
 ## Backlog — optional / not yet built
 
@@ -186,6 +199,19 @@ decisions log below for *why* a given design was chosen.
   in the Docker image (no Maven/Gradle toolchain in either).
 - **Milestone 3 live provider-swap proof** — blocked on a second provider
   key or local model endpoint.
+- **Third-party skills: narrow license detection, `SKILL.md`-only.** The
+  license text heuristic covers 8 permissive licenses. Everything else is
+  `unknown` and needs explicit acknowledgement. Legacy single-file `.md`
+  upstream skills can't be installed. The automated tests mock the SDK
+  fetch. Verified live against `anthropics/skills` @ `8a1541c`:
+  - `frontend-design` refused (collides with the hand-placed copy).
+  - `algorithmic-art` detected as Apache-2.0.
+  - `pdf` came out `unknown` (proprietary), and `enable` refused it
+    without `--accept-unknown-license`.
+  - The agent received `algorithmic-art` only once it was enabled.
+  - A tampered copy was skipped, and `sync` restored it.
+  - A hand-edited lock enabling `pdf` without acknowledgement was skipped,
+    and an untracked directory was ignored.
 - **JS/TS lint tools aren't auto-detected from config** — a Node project's
   own `scripts.lint`/`scripts.typecheck` *are* run if defined, but there's
   no ESLint/tsconfig-based inference the way `_ruff_configured()` infers
@@ -199,6 +225,15 @@ decisions log below for *why* a given design was chosen.
 
 **SDK/tooling gotchas** (re-verify on any SDK upgrade — see CLAUDE.md golden
 rule 2):
+- **Skill content can execute code.** `invoke_skill` runs
+  `render_content_with_commands()` on a skill body, which executes every
+  unescaped ``!`cmd` `` in a shell (confirmed live against v1.47.0). A
+  `SKILL.md` directory's `.mcp.json` becomes MCP server config unless it is
+  loaded with `skip_mcp=True`. `third_party_skills.py` neutralizes both for
+  third-party skills. First-party skills are trusted and left as-is.
+- `find_skill_md_directories()` only checks direct children of a skills dir
+  (`SKILL.md` one level deep), while `find_regular_md_files()` `rglob`s.
+  So any `.md` under `HARNESS_SKILLS_DIR` loads as a legacy skill.
 - `HARNESS_MAX_ITERATIONS` was parsed but never wired to `Conversation` until
   caught while adding the verification retry loop — **closed**, with a
   regression test asserting `Conversation(max_iteration_per_run=...)` is
@@ -534,3 +569,18 @@ considered and live-verification detail: `docs/ROADMAP.txt`.
   post-hoc verification caught the entrypoint-ordering failure (pytest
   alone had already passed), sent the automated follow-up, and the agent
   fixed it — final state `verified` after exactly 1 retry.
+- **Third-party skills: own lockfile + SDK fetch, not the SDK's
+  `InstallationManager`.** The SDK manager marks a new install
+  `enabled=True`, and its `discover_untracked()` auto-enables any directory
+  dropped into the install root. Both contradict the explicit-opt-in rule.
+  It also records no license or integrity. Its
+  `fetch_skill_with_resolution` (subpath containment, SHA resolution, full
+  clone for a pinned SHA) and `Skill.load` are reused as-is. Enablement is
+  enforced twice: at `enable` (CLI) and again at load (the lockfile is
+  hand-editable). `update` disables on any content/license change. `sync`
+  refuses a hash mismatch. Commands live under `harness-admin skills`,
+  the existing argparse subcommand CLI, rather than a new entry point. The
+  lockfile is JSON beside the gitignored dir, not in it, so it can be
+  committed for reproducibility. Existing hand-placed
+  `skills/frontend-design/` etc. are deliberately left loading as before
+  (no silent behavior change); `install` refuses those names instead.
