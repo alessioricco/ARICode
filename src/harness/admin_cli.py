@@ -1,4 +1,5 @@
-"""`harness-admin` — maintenance CLI: server-mode task store + third-party skills.
+"""`harness-admin` — maintenance CLI: server-mode task store, third-party
+skills, and an LLM connectivity check (`check-llm`, see llm_check.py).
 
 The `skills` subcommand group manages local-only third-party skills (see
 third_party_skills.py and MANUAL.md "Third-party skills").
@@ -17,7 +18,8 @@ from __future__ import annotations
 import argparse
 
 from . import third_party_skills as tps
-from .config import Config, load_config
+from .config import Config, ConfigError, load_config, override_llm
+from .llm_check import DEFAULT_TIMEOUT_SECONDS, check_llm
 from .skills import load_skill_catalog
 from .task_store import build_task_store
 
@@ -83,6 +85,34 @@ def _cmd_show(args: argparse.Namespace) -> int:
     print(f"updated_at:         {record.updated_at}")
     print(f"error:              {record.error}")
     return 0
+
+
+# --- LLM connectivity check ------------------------------------------------------
+
+
+def _cmd_check_llm(args: argparse.Namespace) -> int:
+    try:
+        cfg = override_llm(
+            load_config(),
+            model=args.model,
+            base_url=args.base_url,
+            reasoning_effort=args.reasoning_effort,
+        )
+    except ConfigError as exc:
+        print(f"Error: {exc}")
+        return 1
+    print(f"Checking {cfg.model}" + (f" at {cfg.base_url}" if cfg.base_url else "") + " ...")
+    result = check_llm(cfg, timeout=args.timeout)
+    if result.ok:
+        print(f"OK — answered in {result.latency_seconds:.1f}s: {result.reply[:200]!r}")
+        cost = f"${result.cost:.6f}" if result.cost else "unknown (no pricing data)"
+        print(f"Tokens: {result.prompt_tokens} in / {result.completion_tokens} out; cost: {cost}")
+        return 0
+    print(f"FAILED ({result.error_kind}) after {result.latency_seconds:.1f}s")
+    print(f"  {result.error}")
+    if result.hint:
+        print(f"  Hint: {result.hint}")
+    return 1
 
 
 # --- Third-party skills --------------------------------------------------------
@@ -256,7 +286,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="harness-admin",
         description="Maintenance CLI for the harness server's task store "
-        "(HARNESS_TASK_STORE-configured backend) and local third-party skills.",
+        "(HARNESS_TASK_STORE-configured backend), local third-party skills, and an "
+        "LLM connectivity check.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -290,6 +321,23 @@ def build_parser() -> argparse.ArgumentParser:
     show.set_defaults(func=_cmd_show)
 
     _add_skills_parser(subparsers)
+
+    check = subparsers.add_parser(
+        "check-llm",
+        help="Send one tiny prompt to the configured LLM and report whether it answers.",
+    )
+    check.add_argument("--model", default=None, help="Override LLM_MODEL for this check.")
+    check.add_argument("--base-url", default=None, help="Override LLM_BASE_URL for this check.")
+    check.add_argument(
+        "--reasoning-effort", default=None, help="Override LLM_REASONING_EFFORT for this check."
+    )
+    check.add_argument(
+        "--timeout",
+        type=int,
+        default=DEFAULT_TIMEOUT_SECONDS,
+        help=f"Seconds to wait for an answer (default {DEFAULT_TIMEOUT_SECONDS}); no retries.",
+    )
+    check.set_defaults(func=_cmd_check_llm)
 
     return parser
 

@@ -139,6 +139,11 @@ decisions log below for *why* a given design was chosen.
   not free). Built in `stream_task`'s `finally` on every run, attached to
   `TaskOutcome.run_summary`, printed by `cli.py`, written to
   `metadata.json`/`metrics.json`.
+- **`llm_check.py`** + `harness-admin check-llm` — one direct
+  `LLM.completion()` built via `build_llm()` (same config path as a real
+  run), `num_retries=0` plus a short timeout, pass = non-empty text.
+  Construction happens inside the try, since the SDK validates at build
+  time. Errors are classified, with the API key scrubbed.
 - **`workspace.py`** — `build_workspace(cfg)` single dispatch point;
   `local` returns a path, `docker` returns a `DockerWorkspace`, both context
   managers.
@@ -252,6 +257,11 @@ rule 2):
   re-exported from `openhands.tools.preset`.
 - `file_editor` requires absolute paths; does not resolve relative to the
   workspace.
+- The SDK's `LLM(...)` constructor raises `LLMContextWindowTooSmallError`
+  when LiteLLM reports a context window under 16K (e.g. `ollama/llama3`).
+  This happens at build time, not call time. A direct `completion()` lets
+  LiteLLM's `NotFoundError` (unknown model id) through unmapped: it is not
+  an `LLMError`.
 - `python-dotenv` does not strip a trailing `# comment` from an otherwise-blank value.
 - `sys.executable` inside the PyInstaller-frozen Docker image resolves to
   the frozen binary itself, not a Python interpreter (`_python_command()`
@@ -595,3 +605,9 @@ considered and live-verification detail: `docs/ROADMAP.txt`.
   entry carries the real model name. Always computed (not gated on
   `HARNESS_ARTIFACTS_DIR`), and read defensively in the `finally` so a
   metrics failure can't mask the run's own outcome or exception.
+- **`check-llm` lives in `harness-admin`, not the `harness` CLI** — `harness`
+  requires a task positional, while `harness-admin` is already the
+  subcommand-based maintenance CLI. There's no `--api-key` flag, so a key
+  never lands in shell history; use `LLM_API_KEY=... harness-admin check-llm`.
+  Retries are disabled so a bad key/endpoint fails in seconds, not after
+  the SDK's 5 backoff retries.

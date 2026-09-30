@@ -744,6 +744,34 @@ uv run harness-admin purge [--ttl-seconds N]      # manually trigger a TTL purge
 `harness-admin skills ...` manages third-party skills — see
 [Third-party skills](#third-party-skills-harness-admin-skills).
 
+**`harness-admin check-llm`** — checks that the configured model is
+reachable and answering, without running an agent:
+
+```bash
+uv run harness-admin check-llm                        # the model from .env
+uv run harness-admin check-llm --model anthropic/claude-sonnet-4-5-20250929
+uv run harness-admin check-llm --model ollama/qwen2.5-coder --base-url http://localhost:11434
+```
+
+```
+Checking openai/gpt-5.6-luna ...
+OK — answered in 2.8s: 'OK'
+Tokens: 17 in / 4 out; cost: $0.000008
+```
+
+It builds the LLM exactly as a real run does (same `LLM_*` settings;
+`--model`/`--base-url`/`--reasoning-effort` override them for this check
+only), sends one tiny prompt with **no retries** and a `--timeout`
+(default `60`s), and passes only if the model returns non-empty text. It
+exits `0` on success and `1` on failure. On failure it prints the kind of
+error (`authentication`, `rate_limit`, `timeout`, `unavailable`,
+`model_not_found`, `bad_request`, `setup`, `no_reply`, or `error`) with a
+hint. `setup` means the SDK refused the configuration before sending
+anything (see [Troubleshooting](#troubleshooting)). The API key always comes
+from `.env`/`LLM_API_KEY` (there's no `--api-key` flag, so it never lands in
+shell history) and is scrubbed from any error text before printing. A
+successful check costs one very small request.
+
 `purge` uses `HARNESS_TASK_TTL_SECONDS` from `.env` by default; pass
 `--ttl-seconds` to override it for one run. It refuses to run (exit `1`,
 no records touched) when the effective TTL is `0` — "keep forever" is a
@@ -1786,6 +1814,14 @@ uv run pytest -q
 **"LLM_MODEL is required" / "LLM_API_KEY is required"** — `.env` is missing
 or a required value is blank. Copy `.env.example` and fill in `LLM_MODEL` +
 `LLM_API_KEY` (or `LLM_BASE_URL` for a keyless local model).
+
+**"context window of 8,192 tokens, which is below the minimum of 16,384"**
+— the SDK refuses to build an LLM whose context window (as LiteLLM reports
+it) is under 16K tokens. That happens before any request is sent, so it
+blocks runs too. It's common with local models (e.g. `ollama/llama3`).
+Raise the model's context window on the server side (for Ollama, a larger
+`num_ctx`), or pick a model with a larger window. `harness-admin check-llm`
+reports this as a `setup` failure.
 
 **`LLM_BASE_URL` gets read as a literal `# comment` string** — `python-dotenv`
 does not strip a trailing `# comment` from a line whose value is otherwise
