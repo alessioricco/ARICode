@@ -1004,12 +1004,55 @@ def discover_verification_plan(detection: ProjectDetection) -> list[CheckSpec]:
             primary=True,
             command=None,
             cwd=detection.root,
-            unavailable_reason=(
-                "No known project type (Python, Node, Go, Rust, Java) was "
-                "detected — verification is unavailable."
-            ),
+            unavailable_reason=_describe_unrecognized_workspace(detection.root),
         )
     ]
+
+
+_LISTED_FILES_LIMIT = 5
+_WEB_PAGE_SUFFIXES = (".html", ".htm")
+
+
+def _describe_unrecognized_workspace(root: str) -> str:
+    """Explain an `"unknown"` detection in terms of what *is* there.
+
+    "No known project type" alone reads as "no code was produced", which is
+    wrong for e.g. a self-contained index.html with inline JavaScript: the
+    files exist, the harness just has no check for them. So name the files
+    actually found, the manifests that were looked for, and distinguish a
+    genuinely empty workspace.
+    """
+    found: list[str] = []
+    base_depth = root.rstrip(os.sep).count(os.sep)
+    for current, dirs, files in os.walk(root):
+        if current.rstrip(os.sep).count(os.sep) - base_depth >= _MAX_SCAN_DEPTH:
+            dirs[:] = []
+            continue
+        dirs[:] = sorted(d for d in dirs if d not in _SKIP_DIRS and not d.startswith("."))
+        found.extend(
+            os.path.relpath(os.path.join(current, f), root)
+            for f in sorted(files)
+            if not f.startswith(".")
+        )
+    if not found:
+        return "The workspace contains no files — nothing was produced for the harness to verify."
+    listed = ", ".join(found[:_LISTED_FILES_LIMIT])
+    if len(found) > _LISTED_FILES_LIMIT:
+        listed += f", … ({len(found)} files in total)"
+    # One representative manifest per ecosystem keeps the message readable.
+    manifests = ", ".join(markers[0] for _, markers in _LANGUAGE_MARKERS)
+    message = (
+        f"Found {listed} — but no project manifest the harness recognizes "
+        f"({manifests}), so there was nothing it could run or test. The files "
+        "exist; the result is unverified, not failed."
+    )
+    if any(f.lower().endswith(_WEB_PAGE_SUFFIXES) for f in found):
+        message += (
+            " Standalone HTML/JavaScript pages aren't executed by the harness: "
+            "open the page in a browser to check it, or add a package.json "
+            "with a `test` script to make it verifiable."
+        )
+    return message
 
 
 def run_full_verification(working_dir: str) -> VerificationRun:

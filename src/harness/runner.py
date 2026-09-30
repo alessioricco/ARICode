@@ -307,8 +307,9 @@ def _build_completion_contract(
         limitations.extend(run.limitation_notes)
     if not aborted and not skipped and not checks:
         limitations.append(
-            "No automated check could be run for this project (no known "
-            "project type or configured check was detected)."
+            "No automated check could be run for this project, so completion "
+            "is unverified (not failed) — see the verification note for what "
+            "was found."
         )
     acceptance_criteria = ["The task described in the original request is implemented."]
     acceptance_criteria.extend(f"`{cmd}` completes successfully." for cmd in checks)
@@ -744,12 +745,12 @@ def _verify_and_report(
 
     contract = _build_completion_contract(task, run, skipped=False, aborted=False)
     if run.state == "inconclusive" and not _is_clean_no_tests_collected(run):
-        summaries = "; ".join(c.summary for c in run.checks) or "no known project type detected"
+        summaries = "; ".join(c.summary for c in run.checks) or "no applicable check was found"
         _emit_notice(
             emit,
-            "Harness verification: automated checks found nothing runnable "
-            f"to confirm this project actually works ({summaries}). The "
-            "agent's own completion claim was not independently verified.",
+            "Harness verification: no automated check applies to this "
+            f"project ({summaries}) The agent's own completion claim was not "
+            "independently verified.",
         )
     return TaskOutcome(
         verification_state=run.state,

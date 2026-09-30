@@ -533,7 +533,49 @@ def test_unknown_project_plan_is_a_single_unavailable_check(tmp_path):
     assert len(plan) == 1
     assert plan[0].primary is True
     assert plan[0].command is None
-    assert "No known project type" in plan[0].unavailable_reason
+    assert "contains no files" in plan[0].unavailable_reason
+
+
+def test_unknown_project_reason_names_the_files_that_exist(tmp_path):
+    # Live-caught: a self-contained index.html game got "No known project
+    # type ... detected", which read as if no code had been produced.
+    (tmp_path / "index.html").write_text("<script>let x = 1;</script>")
+    (tmp_path / "README.md").write_text("# Game")
+
+    reason = discover_verification_plan(ProjectDetection(language="unknown", root=str(tmp_path)))[
+        0
+    ].unavailable_reason
+
+    assert "README.md, index.html" in reason
+    assert "package.json" in reason and "pyproject.toml" in reason
+    assert "unverified, not failed" in reason
+    assert "open the page in a browser" in reason
+
+
+def test_unknown_project_reason_omits_web_hint_without_html(tmp_path):
+    (tmp_path / "notes.txt").write_text("hi")
+
+    reason = discover_verification_plan(ProjectDetection(language="unknown", root=str(tmp_path)))[
+        0
+    ].unavailable_reason
+
+    assert "notes.txt" in reason
+    assert "browser" not in reason
+
+
+def test_unknown_project_reason_truncates_long_listings_and_skips_noise(tmp_path):
+    for i in range(8):
+        (tmp_path / f"f{i}.txt").write_text("x")
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "dep.js").write_text("x")
+    (tmp_path / ".hidden").write_text("x")
+
+    reason = discover_verification_plan(ProjectDetection(language="unknown", root=str(tmp_path)))[
+        0
+    ].unavailable_reason
+
+    assert "(8 files in total)" in reason
+    assert "dep.js" not in reason and ".hidden" not in reason
 
 
 def test_ambiguous_project_plan_is_a_single_unavailable_check_naming_candidates(tmp_path):
