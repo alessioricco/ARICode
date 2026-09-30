@@ -79,6 +79,7 @@ def write_run_artifacts(
     error: str | None,
     combined_metrics: dict[str, Any],
     per_model_metrics: dict[str, dict[str, Any]],
+    run_summary: dict[str, Any] | None = None,
 ) -> None:
     """Write `metadata.json`/`transcript.json`/`metrics.json` for one run.
 
@@ -111,6 +112,8 @@ def write_run_artifacts(
             else None
         ),
         "error": error,
+        # Running time, models used, total tokens and cost — run_summary.py.
+        "run_summary": run_summary,
     }
 
     with open(os.path.join(run_dir, "metadata.json"), "w", encoding="utf-8") as f:
@@ -118,4 +121,8 @@ def write_run_artifacts(
     with open(os.path.join(run_dir, "transcript.json"), "w", encoding="utf-8") as f:
         json.dump(messages, f, indent=2)
     with open(os.path.join(run_dir, "metrics.json"), "w", encoding="utf-8") as f:
-        json.dump({"combined": combined_metrics, "per_model": per_model_metrics}, f, indent=2)
+        json.dump(
+            {"summary": run_summary, "combined": combined_metrics, "per_model": per_model_metrics},
+            f,
+            indent=2,
+        )

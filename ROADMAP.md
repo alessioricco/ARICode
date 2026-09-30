@@ -133,6 +133,12 @@ decisions log below for *why* a given design was chosen.
   `<artifacts_dir>/<project-or-"_unscoped">/<run_id>/`, own path-containment
   check. No SDK dependency. A sibling top-level directory (mirrors
   `HARNESS_PROJECTS_DIR`'s shape), not nested inside a project.
+- **`run_summary.py`** — pure: `summarize_run(duration, {usage_id:
+  Metrics.get()})` → `RunSummary` (wall-clock time, models that actually
+  made calls, tokens, cost; zero cost with nonzero tokens = "unknown",
+  not free). Built in `stream_task`'s `finally` on every run, attached to
+  `TaskOutcome.run_summary`, printed by `cli.py`, written to
+  `metadata.json`/`metrics.json`.
 - **`workspace.py`** — `build_workspace(cfg)` single dispatch point;
   `local` returns a path, `docker` returns a `DockerWorkspace`, both context
   managers.
@@ -584,3 +590,8 @@ considered and live-verification detail: `docs/ROADMAP.txt`.
   committed for reproducibility. Existing hand-placed
   `skills/frontend-design/` etc. are deliberately left loading as before
   (no silent behavior change); `install` refuses those names instead.
+- **Run summary uses per-`usage_id` metrics, not the SDK's combined
+  metrics** — the combined entry's model is `"default"`; each per-usage
+  entry carries the real model name. Always computed (not gated on
+  `HARNESS_ARTIFACTS_DIR`), and read defensively in the `finally` so a
+  metrics failure can't mask the run's own outcome or exception.

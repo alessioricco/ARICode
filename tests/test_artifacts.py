@@ -202,3 +202,11 @@ def test_write_run_artifacts_with_no_project_uses_unscoped_bucket(tmp_path):
     )
 
     assert (tmp_path / "_unscoped" / "run-2" / "metadata.json").exists()
+
+
+def test_run_summary_is_written_to_metadata_and_metrics(tmp_path):
+    summary = {"duration_seconds": 12.5, "total_tokens": 42, "total_cost": 0.01, "models": []}
+    run_dir = _write(tmp_path, run_summary=summary)
+
+    assert json.loads((run_dir / "metadata.json").read_text())["run_summary"] == summary
+    assert json.loads((run_dir / "metrics.json").read_text())["summary"] == summary

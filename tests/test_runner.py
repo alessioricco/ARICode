@@ -672,11 +672,12 @@ def test_enforce_task_tracker_completion_reports_budget_exhausted_mid_retry(monk
 
 
 def test_stream_task_short_circuits_when_task_budget_already_exhausted(monkeypatch):
-    # First time.monotonic() call computes `deadline = now + max_task_seconds`
-    # inside stream_task; the second is _run_with_confirmation's own check,
-    # simulating that max_task_seconds' worth of wall-clock time has already
-    # passed between the two (a tiny max_task_seconds makes this realistic,
-    # but the clock is mocked so the test doesn't need to actually wait).
+    # time.monotonic() calls, in order: stream_task's run-summary start time;
+    # `deadline = now + max_task_seconds`; _run_with_confirmation's own
+    # check, simulating that max_task_seconds' worth of wall-clock time has
+    # already passed (a tiny max_task_seconds makes this realistic, but the
+    # clock is mocked so the test doesn't need to actually wait); and the
+    # run summary's end time.
     conversation = _RecordingConversation()
     monkeypatch.setattr(runner, "Conversation", lambda **_kwargs: conversation)
     monkeypatch.setattr(runner, "build_agent", lambda cfg, **_kw: "fake-agent")
@@ -687,12 +688,13 @@ def test_stream_task_short_circuits_when_task_budget_already_exhausted(monkeypat
         "_enforce_task_tracker_completion",
         lambda *a, **kw: tracker_calls.__setitem__("count", tracker_calls["count"] + 1),
     )
-    clock = iter([0.0, 100.0])
+    clock = iter([0.0, 0.0, 100.0, 100.0])
     monkeypatch.setattr(runner.time, "monotonic", lambda: next(clock))
 
     outcome = runner.stream_task("do the thing", cfg=_cfg(max_task_seconds=1, verify_tests="never"))
 
     assert outcome.verification_state == "budget_exhausted"
+    assert outcome.run_summary.duration_seconds == 100.0
     assert tracker_calls["count"] == 0  # never reached task_tracker enforcement
 
 
@@ -2151,6 +2153,7 @@ def test_artifacts_are_written_even_when_the_task_raises(monkeypatch, tmp_path):
     metadata = json.loads((run_dirs[0] / "metadata.json").read_text())
     assert metadata["verification_state"] is None
     assert "boom" in metadata["error"]
+    assert metadata["run_summary"]["duration_seconds"] >= 0  # still recorded on failure
 
 
 def test_artifacts_metrics_include_per_model_breakdown_after_a_switch(monkeypatch, tmp_path):
@@ -2176,3 +2179,8 @@ def test_artifacts_metrics_include_per_model_breakdown_after_a_switch(monkeypatc
     metrics = json.loads((run_dirs[0] / "metrics.json").read_text())
     assert metrics["combined"]["accumulated_cost"] == 0.03
     assert set(metrics["per_model"]) == {"harness:cheap", "harness:balanced"}
+    metadata = json.loads((run_dirs[0] / "metadata.json").read_text())
+    assert metrics["summary"] == metadata["run_summary"]
+    assert round(metadata["run_summary"]["total_cost"], 6) == 0.03
+    assert len(metadata["run_summary"]["models"]) == 2
+    assert metadata["run_summary"]["duration_seconds"] >= 0

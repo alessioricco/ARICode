@@ -10,6 +10,7 @@ import pytest
 
 from harness import cli
 from harness.config import Config, ConfigError
+from harness.run_summary import ModelUsage, RunSummary
 from harness.runner import CompletionContract, TaskOutcome, TaskResult
 
 
@@ -1253,3 +1254,30 @@ def test_exits_nonzero_when_acceptance_check_failed(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert exit_code == 1
     assert "Verification: acceptance_failed" in out
+
+
+def test_cli_prints_run_summary_at_the_end(monkeypatch, capsys):
+    result = _fake_result([_FakeMessage("done")])
+    result.outcome = TaskOutcome(
+        verification_state="verified",
+        completion_contract=result.outcome.completion_contract,
+        run_summary=RunSummary(
+            duration_seconds=242.6,
+            models=(
+                ModelUsage(
+                    model="openai/gpt-4o", prompt_tokens=900, completion_tokens=100, cost=0.05
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setattr(cli, "load_config", lambda: _cfg())
+    monkeypatch.setattr(cli, "run_task", lambda *a, **kw: result)
+
+    assert cli.main(["do something"]) == 0
+
+    out = capsys.readouterr().out
+    assert out.index("Verification: verified") < out.index("Run summary:")
+    assert "Total running time: 4m 03s" in out
+    assert "Models: openai/gpt-4o" in out
+    assert "Total tokens: 1,000" in out
+    assert "Total cost: $0.0500" in out

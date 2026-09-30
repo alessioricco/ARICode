@@ -385,6 +385,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\nVerification: {outcome.verification_state}")
     for note in outcome.completion_contract.limitations:
         print(f"  - {note}")
+    if outcome.run_summary is not None:
+        print("\nRun summary:")
+        for line in outcome.run_summary.format_lines():
+            print(f"  {line}")
     if outcome.verification_state in (
         "retry_exhausted",
         "no_progress",

@@ -369,6 +369,39 @@ normally, it doesn't fall back to the next model.
 
 ## Run artifacts
 
+### End-of-run summary (always on)
+
+Every CLI run ends with a summary after the verification result, whether or
+not `HARNESS_ARTIFACTS_DIR` is set:
+
+```
+Run summary:
+  Total running time: 4m 03s
+  Models: openai/gpt-5.6-luna
+  Total tokens: 801,191 (input 774,063, of which cached 725,104; output 27,128)
+  Total cost: $0.0593
+```
+
+- **Total running time** is wall clock for the whole task — model
+  selection, every agent run, harness verification and retries, and any
+  `--interactive` waits.
+- **Models** lists every model that actually made LLM calls (with auto
+  model selection, a fallback shows up as a second model, and a per-model
+  token/cost line is added). Candidates that were never called are omitted.
+- **Total tokens** is input + output across all models; cached input is
+  included in the input figure, and reasoning tokens in the output figure.
+- **Total cost** comes from the SDK/LiteLLM's own pricing. When LiteLLM has
+  no pricing for a model (common for local/self-hosted endpoints) it
+  reports `0`; the summary shows that as `+ unknown (no pricing data for
+  …)` rather than as free.
+
+A run that raises (e.g. every auto-selection candidate failed) prints only
+the error; its summary is still written to the artifacts below when those
+are enabled. The same data is on `TaskOutcome.run_summary` for Python
+callers.
+
+### Artifacts directory
+
 `HARNESS_ARTIFACTS_DIR` (blank by default — disabled) writes a durable,
 git-ignorable record of how each task run actually went: metadata, the
 full message transcript, and real token/cost metrics. It's a separate,
@@ -393,13 +426,16 @@ Each run folder has three files:
 - **`metadata.json`** — `run_id`, `project`, `task`, `execution`, `model`
   (the model that actually did the work — the *final* one, if auto
   selection escalated), `model_selection`, `started_at`/`ended_at`,
-  `verification_state`, `completion_contract`, `acceptance_results`, and
-  `error` (set if the run raised — written even then, via a `finally`
+  `verification_state`, `completion_contract`, `acceptance_results`,
+  `run_summary` (the end-of-run summary above: `duration_seconds`,
+  `models` with per-model tokens/cost, `total_tokens`, `total_cost`,
+  `cost_complete`), and `error` (set if the run raised — written even then, via a `finally`
   block, since a failed run's diagnostics matter at least as much as a
   successful one's).
 - **`transcript.json`** — every message produced during the run, same
   shape server mode's `GET /tasks/{id}` already returns.
-- **`metrics.json`** — `{"combined": ..., "per_model": ...}`: real token
+- **`metrics.json`** — `{"summary": ..., "combined": ..., "per_model": ...}`
+  (`summary` is the same `run_summary` object as in `metadata.json`): real token
   counts and cost from the SDK's own `conversation.conversation_stats`
   (`accumulated_cost`, prompt/completion/cache/reasoning token counts).
   `per_model` breaks this down by which model actually ran each part of

@@ -5,6 +5,7 @@ Result is captured via an event callback — there is no `conversation.result`.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import time
@@ -42,7 +43,10 @@ from .model_selection import (
     llm_for_entry,
     write_model_decisions,
 )
+from .run_summary import RunSummary, summarize_run
 from .workspace import build_workspace
+
+logger = logging.getLogger(__name__)
 
 # The eleven terminal states a task run can end in. Exactly these because
 # they're the ones a caller needs to tell apart to know whether to trust a
@@ -144,6 +148,9 @@ class TaskOutcome:
     # model_selection.py's ModelChain. The same records are also written to
     # MODEL_DECISIONS.md in the project workspace (write_model_decisions).
     model_decisions: tuple[ModelDecisionRecord, ...] = ()
+    # Wall-clock time, models used, tokens, and cost for the whole task —
+    # see run_summary.py. Always set by stream_task.
+    run_summary: RunSummary | None = None
 
     @property
     def success(self) -> bool:
@@ -1039,6 +1046,10 @@ def stream_task(
     again here, purely to bucket this run's artifacts folder the same way
     `HARNESS_PROJECTS_DIR` is bucketed.
     """
+    # Total running time covers the whole task, model selection and
+    # verification included (and any interactive waits — it is wall clock).
+    run_started = time.monotonic()
+    started_at = datetime.now(UTC).isoformat()
     if cfg is None:
         cfg = load_config()
     emit = on_message or (lambda _msg: None)
@@ -1107,7 +1118,6 @@ def stream_task(
         # /tasks/{id}) and record wall-clock start — a no-op when unset.
         if cfg.artifacts_dir:
             run_id = run_id or str(uuid.uuid4())
-            started_at = datetime.now(UTC).isoformat()
 
         outcome: TaskOutcome | None = None
         captured_error: BaseException | None = None
@@ -1133,6 +1143,8 @@ def stream_task(
             # the live repro this fixed in ROADMAP.md's decisions log.
             if model_chain is not None:
                 write_model_decisions(cfg.workspace, model_chain.decisions)
+            per_model_metrics = _per_model_metrics(conversation)
+            run_summary = summarize_run(time.monotonic() - run_started, per_model_metrics)
             if cfg.artifacts_dir:
                 stats = conversation.conversation_stats
                 write_run_artifacts(
@@ -1151,15 +1163,29 @@ def stream_task(
                     outcome=outcome,
                     error=(str(captured_error) if captured_error is not None else None),
                     combined_metrics=stats.get_combined_metrics().get(),
-                    per_model_metrics={
-                        usage_id: metrics.get()
-                        for usage_id, metrics in stats.usage_to_metrics.items()
-                    },
+                    per_model_metrics=per_model_metrics,
+                    run_summary=run_summary.to_dict(),
                 )
         outcome = _apply_acceptance_checks(outcome, cfg, emit, acceptance_checks)
         if model_chain is not None:
             outcome = replace(outcome, model_decisions=tuple(model_chain.decisions))
-        return outcome
+        return replace(outcome, run_summary=run_summary)
+
+
+def _per_model_metrics(conversation: Conversation) -> dict[str, dict]:
+    """`{usage_id: Metrics.get()}` from the SDK's conversation stats.
+
+    Called from stream_task's `finally`: a failure here must degrade to "no
+    metrics" rather than replace the run's own outcome or exception.
+    """
+    try:
+        return {
+            usage_id: metrics.get()
+            for usage_id, metrics in conversation.conversation_stats.usage_to_metrics.items()
+        }
+    except Exception:
+        logger.warning("Could not read conversation metrics for the run summary", exc_info=True)
+        return {}
 
 
 def _run_stream_task_phases(
